@@ -276,7 +276,7 @@ def _decode_index_from_hdf5(
 def _create_resizable_dataset(
     group: h5py.Group,
     name: str,
-    dtype: np.dtype[Any] | h5py.special_dtype,
+    dtype: Any,
     shape: tuple[int, ...],
     maxshape: tuple[int | None, ...],
     chunks: tuple[int, ...],
