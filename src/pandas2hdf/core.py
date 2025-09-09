@@ -2,7 +2,7 @@
 
 import json
 from datetime import datetime
-from typing import Any, Union
+from typing import Any
 
 import h5py
 import numpy as np
@@ -276,7 +276,7 @@ def _decode_index_from_hdf5(
 def _create_resizable_dataset(
     group: h5py.Group,
     name: str,
-    dtype: Union[np.dtype[Any], h5py.special_dtype],
+    dtype: np.dtype[Any] | h5py.special_dtype,
     shape: tuple[int, ...],
     maxshape: tuple[int | None, ...],
     chunks: tuple[int, ...],
