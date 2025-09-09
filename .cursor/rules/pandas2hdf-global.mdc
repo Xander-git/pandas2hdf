@@ -3,7 +3,6 @@ alwaysApply: true
 ---
 # Scope
 - Only modify the current file or explicit @selection unless a PLAN is provided and approved.
-- Keep diffs minimal and reversible.
 
 # Style
 - Use type hints and Google-style docstrings.
