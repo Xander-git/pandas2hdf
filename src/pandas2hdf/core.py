@@ -1,1214 +1,843 @@
-"""Core functionality for pandas to HDF5 round-trip persistence with SWMR support."""
-
-from __future__ import annotations
+"""Core functionality for pandas-to-HDF5 persistence with SWMR support."""
 
 import json
 from datetime import datetime
-from typing import Any, Optional, cast
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import h5py
 import numpy as np
 import pandas as pd
 
 
-class H5SWMRError(Exception):
+class Pandas2HDFError(Exception):
+    """Base exception for pandas2hdf operations."""
+
+
+class SWMRModeError(Pandas2HDFError):
     """Raised when SWMR mode is required but not enabled."""
 
-    pass
+
+class SchemaMismatchError(Pandas2HDFError):
+    """Raised when trying to write data that doesn't match existing schema."""
 
 
-class H5SchemaError(Exception):
-    """Raised when there's a schema mismatch during writes."""
-
-    pass
-
-
-class H5DataError(Exception):
-    """Raised for data validation errors."""
-
-    pass
+class ValidationError(Pandas2HDFError):
+    """Raised when data validation fails."""
 
 
 def assert_swmr_on(g: h5py.Group) -> None:
-    """Assert that the file is in SWMR mode.
-
+    """Assert that SWMR mode is enabled on the group's file.
+    
     Args:
-        g: An h5py Group object whose file should be in SWMR mode.
-
+        g: HDF5 group to check.
+        
     Raises:
-        H5SWMRError: If the file is not in SWMR mode.
+        SWMRModeError: If SWMR mode is not enabled.
     """
     if not g.file.swmr_mode:
-        raise H5SWMRError(
-            f"File {g.file.filename} is not in SWMR mode. "
-            "Open with swmr=True or enable SWMR mode before writing."
+        raise SWMRModeError(
+            f"SWMR mode is required but not enabled on file {g.file.filename}"
         )
 
 
-def _get_value_encoding(series: pd.Series) -> tuple[str, str]:
-    """Determine the encoding type for Series values.
-
-    Args:
-        series: The pandas Series to analyze.
-
-    Returns:
-        Tuple of (values_kind, orig_values_dtype) strings.
-    """
-    dtype = series.dtype
-    orig_dtype = str(dtype)
-
-    # Check for complex numbers early
-    if pd.api.types.is_complex_dtype(dtype):
-        raise H5DataError(f"Unsupported dtype: {dtype} (complex numbers not supported)")
-
-    if pd.api.types.is_numeric_dtype(dtype) or pd.api.types.is_bool_dtype(dtype):
-        return ("numeric_float64", orig_dtype)
-    elif pd.api.types.is_string_dtype(dtype) or pd.api.types.is_object_dtype(dtype):
-        # Check if all non-null values are strings
-        non_null = series.dropna()
-        if len(non_null) == 0 or all(isinstance(x, str) for x in non_null):
-            return ("string_utf8_vlen", orig_dtype)
-    elif isinstance(dtype, pd.CategoricalDtype):
-        return ("string_utf8_vlen", orig_dtype)
-
-    raise H5DataError(f"Unsupported dtype: {dtype}")
+def _get_string_dtype() -> h5py.special_dtype:
+    """Get UTF-8 variable-length string dtype for HDF5."""
+    return h5py.string_dtype("utf-8")
 
 
-def _encode_values(
-    series: pd.Series,
-) -> tuple[np.ndarray, Optional[np.ndarray]]:
-    """Encode Series values for HDF5 storage.
-
-    Args:
-        series: The pandas Series to encode.
-
-    Returns:
-        Tuple of (values_array, mask_array or None).
-    """
-    values_kind, _ = _get_value_encoding(series)
-
-    if values_kind == "numeric_float64":
-        # Convert to float64, NaN for missing
-        if pd.api.types.is_bool_dtype(series.dtype):
-            # Convert boolean to float: True=1.0, False=0.0
-            values = series.astype(float).to_numpy()
-        else:
-            values = series.astype(np.float64).to_numpy()
-        return (values, None)
-
-    elif values_kind == "string_utf8_vlen":
-        # Convert to object array of strings
-        if isinstance(series.dtype, pd.CategoricalDtype):
-            # Convert categorical to strings
-            str_series = series.astype(str)
-        else:
-            str_series = series
-
-        # Create mask: 1=valid, 0=missing
-        mask = pd.notna(str_series).astype(np.uint8).to_numpy()
-
-        # Replace NaN/None with empty string for storage
-        values = str_series.fillna("").astype(str).to_numpy()
-
-        return (values, mask)
-
-    raise H5DataError(f"Unexpected values_kind: {values_kind}")
-
-
-def _encode_index(
-    index: pd.Index,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Encode pandas Index as UTF-8 strings with mask.
+def _encode_values_for_hdf5(
+    values: pd.Series,
+) -> Tuple[np.ndarray, Optional[np.ndarray], str, str]:
+    """Encode pandas Series values for HDF5 storage.
     
     Args:
-        index: The pandas Index to encode.
+        values: pandas Series to encode.
         
     Returns:
-        Tuple of (index_array, mask_array).
+        Tuple of (encoded_values, mask, values_kind, orig_dtype):
+        - encoded_values: numpy array ready for HDF5 storage
+        - mask: optional mask array (uint8, 1=valid, 0=missing) for strings
+        - values_kind: "numeric_float64" or "string_utf8_vlen"
+        - orig_dtype: string representation of original dtype
     """
-    # Convert to strings
-    if isinstance(index, pd.DatetimeIndex):
-        # Convert datetime to ISO format strings
-        str_index = index.strftime("%Y-%m-%dT%H:%M:%S.%f")
+    orig_dtype = str(values.dtype)
+    
+    if pd.api.types.is_numeric_dtype(values.dtype) or pd.api.types.is_bool_dtype(
+        values.dtype
+    ):
+        # Convert to float64, with NaN for missing values
+        encoded = values.astype(np.float64).values
+        mask = None
+        values_kind = "numeric_float64"
+    elif pd.api.types.is_string_dtype(values.dtype) or pd.api.types.is_object_dtype(
+        values.dtype
+    ):
+        # Convert to UTF-8 strings with mask for missing values
+        str_values = values.astype(str)
+        mask = (~values.isna()).astype(np.uint8)
+        # Replace NaN string representations with empty strings
+        str_array = str_values.values
+        str_array[values.isna()] = ""
+        encoded = str_array.astype(_get_string_dtype())
+        values_kind = "string_utf8_vlen"
     else:
-        # Convert any index to strings
-        str_index = index.astype(str)
+        raise ValidationError(f"Unsupported dtype: {values.dtype}")
     
-    # Create mask for any NaN/None values in the original index
-    mask = pd.notna(pd.Series(index.to_numpy())).astype(np.uint8).to_numpy()
-    
-    # Convert to numpy array
-    values = np.array(str_index, dtype=str)
-    
-    return (values, mask)
+    return encoded, mask, values_kind, orig_dtype
 
 
-def _encode_multiindex(index: pd.MultiIndex) -> dict[str, Any]:
-    """Encode pandas MultiIndex preserving all level information.
+def _encode_index_for_hdf5(
+    index: pd.Index,
+) -> Tuple[Union[np.ndarray, List[np.ndarray]], Union[np.ndarray, List[np.ndarray]], Dict[str, Any], str]:
+    """Encode pandas Index/MultiIndex for HDF5 storage.
     
     Args:
-        index: The pandas MultiIndex to encode.
+        index: pandas Index or MultiIndex to encode.
         
     Returns:
-        Dictionary containing level data, codes, names, and metadata.
+        Tuple of (encoded_arrays, mask_arrays, metadata, orig_dtype):
+        - encoded_arrays: array or list of arrays for MultiIndex levels
+        - mask_arrays: mask array or list of mask arrays
+        - metadata: dict with index metadata
+        - orig_dtype: string representation of original dtype
     """
-    result = {
-        "nlevels": index.nlevels,
-        "level_names": [name if name is not None else "" for name in index.names],
-        "level_dtypes": [str(level.dtype) for level in index.levels],
-        "levels": {},
-        "codes": index.codes,
-    }
+    orig_dtype = str(index.dtype) if not isinstance(index, pd.MultiIndex) else "MultiIndex"
     
-    # Encode each level
-    for i, level in enumerate(index.levels):
-        level_values, level_mask = _encode_level_values(level)
-        result["levels"][f"level_{i}"] = {
-            "values": level_values,
-            "mask": level_mask,
+    if isinstance(index, pd.MultiIndex):
+        # Handle MultiIndex
+        encoded_arrays = []
+        mask_arrays = []
+        
+        for level_values in index.to_frame().values.T:
+            level_series = pd.Series(level_values)
+            str_values = level_series.astype(str)
+            mask = (~level_series.isna()).astype(np.uint8)
+            # Replace NaN representations
+            str_array = str_values.values
+            str_array[level_series.isna()] = ""
+            encoded_arrays.append(str_array.astype(_get_string_dtype()))
+            mask_arrays.append(mask)
+        
+        metadata = {
+            "index_is_multiindex": 1,
+            "index_levels": index.nlevels,
+            "index_names": json.dumps([str(name) if name is not None else None for name in index.names]),
+        }
+    else:
+        # Handle regular Index
+        index_series = pd.Series(index)
+        str_values = index_series.astype(str)
+        mask = (~index_series.isna()).astype(np.uint8)
+        # Replace NaN representations
+        str_array = str_values.values
+        str_array[index_series.isna()] = ""
+        encoded_arrays = str_array.astype(_get_string_dtype())
+        mask_arrays = mask
+        
+        metadata = {
+            "index_is_multiindex": 0,
+            "index_levels": 1,
+            "index_names": json.dumps([str(index.name) if index.name is not None else None]),
         }
     
-    return result
+    return encoded_arrays, mask_arrays, metadata, orig_dtype
 
 
-def _encode_level_values(level: pd.Index) -> tuple[np.ndarray, np.ndarray]:
-    """Encode level values similar to regular index encoding."""
-    if isinstance(level, pd.DatetimeIndex):
-        str_level = level.strftime("%Y-%m-%dT%H:%M:%S.%f")
-    else:
-        str_level = level.astype(str)
-    
-    # Create mask for any NaN/None values
-    mask = pd.notna(pd.Series(level.to_numpy())).astype(np.uint8).to_numpy()
-    
-    # Convert to object array to ensure compatibility with h5py
-    values = np.array([str(x) for x in str_level], dtype=object)
-    
-    return (values, mask)
-
-
-def _decode_multiindex(
-    index_data: dict[str, Any], logical_len: int
-) -> pd.MultiIndex:
-    """Decode MultiIndex from stored data.
+def _decode_values_from_hdf5(
+    group: h5py.Group,
+    dataset_name: str = "values",
+    length: Optional[int] = None,
+) -> Tuple[np.ndarray, str]:
+    """Decode values from HDF5 storage back to numpy array.
     
     Args:
-        index_data: Dictionary containing MultiIndex data.
-        logical_len: The logical length of the index.
+        group: HDF5 group containing the datasets.
+        dataset_name: Name of the values dataset.
+        length: Logical length to read (respects preallocated space).
         
     Returns:
-        Reconstructed pandas MultiIndex.
+        Tuple of (decoded_values, values_kind).
     """
-    nlevels = index_data["nlevels"]
-    level_names = index_data["level_names"]
+    values_kind = group.attrs["values_kind"]
+    if isinstance(values_kind, bytes):
+        values_kind = values_kind.decode("utf-8")
+    logical_length = length if length is not None else group.attrs["len"]
     
-    # Decode levels
-    levels = []
-    for i in range(nlevels):
-        level_info = index_data["levels"][f"level_{i}"]
-        level_values = level_info["values"]
-        level_mask = level_info["mask"]
-        
-        # Decode level values
-        decoded_values = []
-        for val, valid in zip(level_values, level_mask):
-            if valid:
-                if isinstance(val, bytes):
-                    decoded_values.append(val.decode("utf-8"))
-                else:
-                    decoded_values.append(val)
-            else:
-                decoded_values.append(None)
-        
-        levels.append(pd.Index(decoded_values))
-    
-    # Get codes for the logical length
-    codes = [code_array[:logical_len] for code_array in index_data["codes"]]
-    
-    # Convert empty names back to None
-    names = [name if name else None for name in level_names]
-    
-    return pd.MultiIndex(levels=levels, codes=codes, names=names)
-
-
-def _write_multiindex_to_hdf5(
-    group: h5py.Group,
-    index: pd.MultiIndex,
-    base_name: str,
-    chunks: tuple[int, ...],
-    compression: str,
-    preallocate: int,
-) -> None:
-    """Write MultiIndex data to HDF5 group.
-    
-    Args:
-        group: HDF5 group to write to.
-        index: MultiIndex to write.
-        base_name: Base name for the index datasets (e.g., 'index').
-        chunks: Chunk shape for datasets.
-        compression: Compression type.
-        preallocate: Size to preallocate.
-    """
-    # Encode the MultiIndex
-    index_data = _encode_multiindex(index)
-    
-    # Create levels group
-    levels_group = group.create_group(f"{base_name}_levels")
-    
-    # Store metadata as attributes
-    levels_group.attrs["nlevels"] = index_data["nlevels"]
-    levels_group.attrs["level_names"] = json.dumps(index_data["level_names"])
-    levels_group.attrs["level_dtypes"] = json.dumps(index_data["level_dtypes"])
-    levels_group.attrs["is_multiindex"] = True
-    
-    # Write each level
-    for level_key, level_info in index_data["levels"].items():
-        level_group = levels_group.create_group(level_key)
-        
-        # Create datasets for level values and mask
-        # Convert to bytes for h5py compatibility
-        string_data = [s.encode('utf-8') if s is not None else b'' for s in level_info["values"]]
-        level_group.create_dataset(
-            "values",
-            data=string_data,
-            dtype=h5py.string_dtype(encoding="utf-8"),
-            compression=compression,
-        )
-        level_group.create_dataset(
-            "mask",
-            data=level_info["mask"],
-            dtype=np.uint8,
-            compression=compression,
-        )
-    
-    # Create codes dataset - shape (nlevels, preallocate)
-    codes_shape = (index_data["nlevels"], preallocate)
-    codes_data = np.full(codes_shape, -1, dtype=np.int32)  # -1 for missing
-    
-    # Fill in actual codes for the current data
-    for i, code_array in enumerate(index_data["codes"]):
-        codes_data[i, : len(code_array)] = code_array
-    
-    group.create_dataset(
-        f"{base_name}_codes",
-        data=codes_data,
-        maxshape=(index_data["nlevels"], None),
-        chunks=(index_data["nlevels"], chunks[0]),
-        compression=compression,
-    )
-
-
-def _write_simple_index_to_hdf5(
-    group: h5py.Group,
-    index: pd.Index,
-    base_name: str,
-    chunks: tuple[int, ...],
-    compression: str,
-    preallocate: int,
-) -> None:
-    """Write simple Index data to HDF5 group."""
-    # Mark as simple index
-    group.attrs[f"{base_name}_is_multiindex"] = False
-    
-    # Create index datasets
-    group.create_dataset(
-        base_name,
-        shape=(preallocate,),
-        maxshape=(None,),
-        dtype=h5py.string_dtype(encoding="utf-8"),
-        chunks=chunks,
-        compression=compression,
-    )
-    
-    group.create_dataset(
-        f"{base_name}_mask",
-        shape=(preallocate,),
-        maxshape=(None,),
-        dtype=np.uint8,
-        chunks=chunks,
-        compression=compression,
-        fillvalue=0,
-    )
-
-
-def _read_multiindex_from_hdf5(
-    group: h5py.Group, base_name: str, logical_len: int
-) -> pd.MultiIndex:
-    """Read MultiIndex data from HDF5 group."""
-    levels_group = group[f"{base_name}_levels"]
-    
-    # Read metadata
-    nlevels = levels_group.attrs["nlevels"]
-    level_names = json.loads(levels_group.attrs["level_names"])
-    
-    # Read level data
-    levels = []
-    for i in range(nlevels):
-        level_group = levels_group[f"level_{i}"]
-        level_values = level_group["values"][:]
-        level_mask = level_group["mask"][:]
-        
-        # Decode level values
-        decoded_values = []
-        for val, valid in zip(level_values, level_mask, strict=False):
-            if valid:
-                if isinstance(val, bytes):
-                    decoded_values.append(val.decode("utf-8"))
-                else:
-                    decoded_values.append(val)
-            else:
-                decoded_values.append(None)
-        
-        levels.append(pd.Index(decoded_values))
-    
-    # Read codes
-    codes_data = group[f"{base_name}_codes"][:, :logical_len]
-    codes = [codes_data[i] for i in range(nlevels)]
-    
-    # Convert empty names back to None
-    names = [name if name else None for name in level_names]
-    
-    return pd.MultiIndex(levels=levels, codes=codes, names=names)
-
-
-def _update_multiindex_data(
-    group: h5py.Group,
-    index: pd.MultiIndex,
-    base_name: str,
-    start: int,
-    end: int,
-) -> None:
-    """Update MultiIndex codes in existing HDF5 datasets."""
-    index_data = _encode_multiindex(index)
-    
-    # Update codes
-    codes_dataset = group[f"{base_name}_codes"]
-    
-    # Resize if needed
-    if codes_dataset.shape[1] < end:
-        new_size = max(end, codes_dataset.shape[1] * 2)
-        codes_dataset.resize((codes_dataset.shape[0], new_size))
-    
-    # Write codes
-    for i, code_array in enumerate(index_data["codes"]):
-        codes_dataset[i, start:end] = code_array
-
-
-def _update_simple_index_data(
-    group: h5py.Group,
-    index: pd.Index,
-    base_name: str,
-    start: int,
-    end: int,
-) -> None:
-    """Update simple Index data in existing HDF5 datasets."""
-    index_values, index_mask = _encode_index(index)
-    
-    # Resize if needed
-    if group[base_name].shape[0] < end:
-        new_size = max(end, group[base_name].shape[0] * 2)
-        group[base_name].resize((new_size,))
-        group[f"{base_name}_mask"].resize((new_size,))
-    
-    # Write data
-    group[base_name][start:end] = index_values
-    group[f"{base_name}_mask"][start:end] = index_mask
-
-
-def preallocate_series_layout(
-    g: h5py.Group,
-    s: pd.Series,
-    *,
-    dataset: str = "values",
-    index_dataset: str = "index",
-    chunks: tuple[int, ...] = (25,),
-    compression: str = "gzip",
-    preallocate: int = 100,
-    require_swmr: bool = True,
-) -> None:
-    """Preallocate HDF5 layout for a Series without writing data.
-
-    Creates resizable, chunked datasets with initial shape=(preallocate,) and
-    maxshape=(None,). Sets len=0 and all schema attributes. This is pure layout
-    preallocation with no user data written.
-
-    Args:
-        g: HDF5 group to write to.
-        s: Series providing schema information.
-        dataset: Name for values dataset.
-        index_dataset: Name for index dataset.
-        chunks: Chunk shape for datasets.
-        compression: Compression type.
-        preallocate: Initial dataset size.
-        require_swmr: Whether to require SWMR mode.
-
-    Raises:
-        H5SWMRError: If require_swmr=True and file not in SWMR mode.
-    """
-    if require_swmr:
-        assert_swmr_on(g)
-
-    # Determine encoding
-    values_kind, orig_values_dtype = _get_value_encoding(s)
-
-    # Create value dataset
     if values_kind == "numeric_float64":
-        dtype = np.float64
-    else:  # string_utf8_vlen
-        dtype = h5py.string_dtype(encoding="utf-8")
+        values = group[dataset_name][:logical_length]
+    elif values_kind == "string_utf8_vlen":
+        values = group[dataset_name][:logical_length]
+        mask = group[f"{dataset_name}_mask"][:logical_length]
+        # Convert back to object array with proper NaN handling
+        result = np.empty(logical_length, dtype=object)
+        result[mask == 1] = [s.decode("utf-8") if isinstance(s, bytes) else str(s) for s in values[mask == 1]]
+        result[mask == 0] = None
+        values = result
+    else:
+        raise ValidationError(f"Unknown values_kind: {values_kind}")
+    
+    return values, values_kind
 
-    g.create_dataset(
-        dataset,
-        shape=(preallocate,),
-        maxshape=(None,),
+
+def _decode_index_from_hdf5(
+    group: h5py.Group,
+    index_dataset_name: str = "index",
+    length: Optional[int] = None,
+) -> pd.Index:
+    """Decode index from HDF5 storage back to pandas Index/MultiIndex.
+    
+    Args:
+        group: HDF5 group containing the index datasets.
+        index_dataset_name: Base name for index datasets.
+        length: Logical length to read.
+        
+    Returns:
+        Reconstructed pandas Index or MultiIndex.
+    """
+    logical_length = length if length is not None else group.attrs["len"]
+    is_multiindex = bool(group.attrs["index_is_multiindex"])
+    index_names_attr = group.attrs["index_names"]
+    if isinstance(index_names_attr, bytes):
+        index_names_attr = index_names_attr.decode("utf-8")
+    index_names = json.loads(index_names_attr)
+    
+    if is_multiindex:
+        levels = []
+        for i in range(group.attrs["index_levels"]):
+            level_data = group[f"{index_dataset_name}/levels/L{i}"][:logical_length]
+            level_mask = group[f"{index_dataset_name}/levels/L{i}_mask"][:logical_length]
+            
+            # Reconstruct level with proper NaN handling
+            level_values = np.empty(logical_length, dtype=object)
+            level_values[level_mask == 1] = [
+                s.decode("utf-8") if isinstance(s, bytes) else str(s) 
+                for s in level_data[level_mask == 1]
+            ]
+            level_values[level_mask == 0] = None
+            levels.append(level_values)
+        
+        return pd.MultiIndex.from_arrays(levels, names=index_names)
+    else:
+        index_data = group[f"{index_dataset_name}/values"][:logical_length]
+        index_mask = group[f"{index_dataset_name}/index_mask"][:logical_length]
+        
+        # Reconstruct index with proper NaN handling
+        index_values = np.empty(logical_length, dtype=object)
+        index_values[index_mask == 1] = [
+            s.decode("utf-8") if isinstance(s, bytes) else str(s) 
+            for s in index_data[index_mask == 1]
+        ]
+        index_values[index_mask == 0] = None
+        
+        return pd.Index(index_values, name=index_names[0])
+
+
+def _create_resizable_dataset(
+    group: h5py.Group,
+    name: str,
+    dtype: Union[np.dtype, h5py.special_dtype],
+    shape: Tuple[int, ...],
+    maxshape: Tuple[Optional[int], ...],
+    chunks: Tuple[int, ...],
+    compression: str,
+) -> h5py.Dataset:
+    """Create a resizable, chunked, compressed dataset."""
+    return group.create_dataset(
+        name,
+        shape=shape,
+        maxshape=maxshape,
         dtype=dtype,
         chunks=chunks,
         compression=compression,
     )
 
-    # Create mask if needed
-    if values_kind == "string_utf8_vlen":
-        g.create_dataset(
-            f"{dataset}_mask",
-            shape=(preallocate,),
-            maxshape=(None,),
-            dtype=np.uint8,
-            chunks=chunks,
-            compression=compression,
-            fillvalue=0,
-        )
 
-    # Create index datasets (handle both simple and MultiIndex)
-    if isinstance(s.index, pd.MultiIndex):
-        _write_multiindex_to_hdf5(g, s.index, index_dataset, chunks, compression, preallocate)
-        g.attrs["index_kind"] = "multiindex"
-    else:
-        _write_simple_index_to_hdf5(g, s.index, index_dataset, chunks, compression, preallocate)
-        g.attrs["index_kind"] = "string_utf8_vlen"
-
-    # Set attributes
-    g.attrs["series_name"] = s.name if s.name is not None else ""
-    g.attrs["len"] = 0  # No data written yet
-    g.attrs["values_kind"] = values_kind
-    g.attrs["index_name"] = (
-        s.index.name if s.index.name is not None and not isinstance(s.index, pd.MultiIndex) else ""
-    )
-    g.attrs["created_at_iso"] = datetime.utcnow().isoformat()
-    g.attrs["version"] = "1.0"
-    g.attrs["orig_values_dtype"] = orig_values_dtype
-    g.attrs["orig_index_dtype"] = str(s.index.dtype)
-
-    if require_swmr:
-        g.file.flush()
-
-
-def save_series_new(
-    g: h5py.Group,
-    s: pd.Series,
+def preallocate_series_layout(
+    group: h5py.Group,
+    series: pd.Series,
     *,
     dataset: str = "values",
     index_dataset: str = "index",
-    chunks: tuple[int, ...] = (25,),
+    chunks: Tuple[int, ...] = (25,),
     compression: str = "gzip",
     preallocate: int = 100,
     require_swmr: bool = True,
 ) -> None:
-    """Save a new Series to HDF5, creating datasets or reusing preallocated layout.
-
+    """Preallocate HDF5 layout for a pandas Series without writing data.
+    
+    Creates resizable, chunked, compressed datasets with initial shape (preallocate,)
+    and maxshape (None,). Initializes masks to zeros and sets len=0.
+    
     Args:
-        g: HDF5 group to write to.
-        s: Series to save.
-        dataset: Name for values dataset.
-        index_dataset: Name for index dataset.
+        group: HDF5 group to write to.
+        series: pandas Series to create layout for (used for schema).
+        dataset: Name for the values dataset.
+        index_dataset: Name for the index dataset.
         chunks: Chunk shape for datasets.
-        compression: Compression type.
-        preallocate: Initial dataset size.
-        require_swmr: Whether to require SWMR mode.
-
+        compression: Compression algorithm.
+        preallocate: Initial allocation size.
+        require_swmr: If True, assert SWMR mode is enabled.
+        
     Raises:
-        H5SWMRError: If require_swmr=True and file not in SWMR mode.
-        H5DataError: If series is empty or has mismatched lengths.
+        SWMRModeError: If require_swmr=True and SWMR mode not enabled.
+        ValidationError: If series validation fails.
     """
     if require_swmr:
-        assert_swmr_on(g)
-
-    if len(s) == 0:
-        raise H5DataError("Cannot save empty series")
-
-    # Check if layout exists
-    if dataset not in g:
-        # Create layout
-        preallocate_series_layout(
-            g,
-            s,
-            dataset=dataset,
-            index_dataset=index_dataset,
-            chunks=chunks,
-            compression=compression,
-            preallocate=max(preallocate, len(s)),
-            require_swmr=require_swmr,
+        assert_swmr_on(group)
+    
+    # Encode series for schema information
+    encoded_values, values_mask, values_kind, orig_values_dtype = _encode_values_for_hdf5(series)
+    encoded_index, index_masks, index_metadata, orig_index_dtype = _encode_index_for_hdf5(series.index)
+    
+    # Create values dataset
+    if values_kind == "numeric_float64":
+        _create_resizable_dataset(
+            group, dataset, np.float64, (preallocate,), (None,), chunks, compression
         )
-
-    # Encode data
-    values, values_mask = _encode_values(s)
-
-    n = len(values)
-
-    # Resize if needed
-    if g[dataset].shape[0] < n:
-        new_size = max(n, preallocate)
-        g[dataset].resize((new_size,))
-        if f"{dataset}_mask" in g:
-            g[f"{dataset}_mask"].resize((new_size,))
-
-    # Write data
-    g[dataset][:n] = values
-    if values_mask is not None:
-        g[f"{dataset}_mask"][:n] = values_mask
-
-    # Handle index data (MultiIndex or simple)
-    index_kind = g.attrs.get("index_kind", "string_utf8_vlen")
-    if index_kind == "multiindex":
-        if not isinstance(s.index, pd.MultiIndex):
-            raise H5SchemaError(
-                "Cannot update MultiIndex series with simple index"
+    else:  # string_utf8_vlen
+        _create_resizable_dataset(
+            group, dataset, _get_string_dtype(), (preallocate,), (None,), chunks, compression
+        )
+        # Create values mask
+        mask_dataset = _create_resizable_dataset(
+            group, f"{dataset}_mask", np.uint8, (preallocate,), (None,), chunks, compression
+        )
+        mask_dataset[:] = 0  # Initialize to all missing
+    
+    # Create index datasets
+    if index_metadata["index_is_multiindex"]:
+        # Create index group and level datasets
+        index_group = group.create_group(index_dataset)
+        levels_group = index_group.create_group("levels")
+        
+        for i in range(index_metadata["index_levels"]):
+            _create_resizable_dataset(
+                levels_group, f"L{i}", _get_string_dtype(), (preallocate,), (None,), chunks, compression
             )
-        _update_multiindex_data(g, s.index, index_dataset, 0, n)
+            mask_dataset = _create_resizable_dataset(
+                levels_group, f"L{i}_mask", np.uint8, (preallocate,), (None,), chunks, compression
+            )
+            mask_dataset[:] = 0  # Initialize to all missing
     else:
-        if isinstance(s.index, pd.MultiIndex):
-            raise H5SchemaError(
-                "Cannot update simple index series with MultiIndex"
-            )
-        _update_simple_index_data(g, s.index, index_dataset, 0, n)
-
-    # Update length
-    g.attrs["len"] = n
-
+        # Create index group
+        index_group = group.create_group(index_dataset)
+        _create_resizable_dataset(
+            index_group, "values", _get_string_dtype(), (preallocate,), (None,), chunks, compression
+        )
+        mask_dataset = _create_resizable_dataset(
+            index_group, "index_mask", np.uint8, (preallocate,), (None,), chunks, compression
+        )
+        mask_dataset[:] = 0  # Initialize to all missing
+    
+    # Set attributes
+    group.attrs["series_name"] = str(series.name) if series.name is not None else ""
+    group.attrs["len"] = 0  # Logical length is 0
+    group.attrs["values_kind"] = values_kind
+    group.attrs["index_kind"] = "string_utf8_vlen"
+    group.attrs["orig_values_dtype"] = orig_values_dtype
+    group.attrs["orig_index_dtype"] = orig_index_dtype
+    group.attrs["created_at_iso"] = datetime.now().isoformat()
+    group.attrs["version"] = "1.0"
+    
+    # Add index metadata
+    for key, value in index_metadata.items():
+        if isinstance(value, str):
+            group.attrs[key] = value
+        else:
+            group.attrs[key] = value
+    
     if require_swmr:
-        g.file.flush()
+        group.file.flush()
+
+
+def save_series_new(
+    group: h5py.Group,
+    series: pd.Series,
+    *,
+    dataset: str = "values",
+    index_dataset: str = "index",
+    chunks: Tuple[int, ...] = (25,),
+    compression: str = "gzip",
+    preallocate: int = 100,
+    require_swmr: bool = True,
+) -> None:
+    """Create datasets and write a pandas Series to HDF5.
+    
+    Creates new datasets or reuses existing preallocated layout.
+    Writes the first len(series) elements and sets logical length.
+    
+    Args:
+        group: HDF5 group to write to.
+        series: pandas Series to persist.
+        dataset: Name for the values dataset.
+        index_dataset: Name for the index dataset.
+        chunks: Chunk shape for new datasets.
+        compression: Compression algorithm for new datasets.
+        preallocate: Initial allocation size for new datasets.
+        require_swmr: If True, assert SWMR mode is enabled.
+        
+    Raises:
+        SWMRModeError: If require_swmr=True and SWMR mode not enabled.
+        ValidationError: If series validation fails.
+    """
+    if require_swmr:
+        assert_swmr_on(group)
+    
+    if len(series) == 0:
+        raise ValidationError("Cannot save empty series")
+    
+    # Check if layout already exists (preallocated)
+    if dataset in group and group.attrs.get("len", -1) == 0:
+        # Use existing preallocated layout
+        save_series_update(group, series, start=0, dataset=dataset, index_dataset=index_dataset, require_swmr=require_swmr)
+        return
+    
+    # Create new layout
+    preallocate_series_layout(
+        group, series, 
+        dataset=dataset, index_dataset=index_dataset,
+        chunks=chunks, compression=compression, 
+        preallocate=max(preallocate, len(series)), 
+        require_swmr=require_swmr
+    )
+    
+    # Write the data
+    save_series_update(group, series, start=0, dataset=dataset, index_dataset=index_dataset, require_swmr=require_swmr)
 
 
 def save_series_update(
-    g: h5py.Group,
-    s: pd.Series,
+    group: h5py.Group,
+    series: pd.Series,
     *,
     start: int = 0,
     dataset: str = "values",
     index_dataset: str = "index",
     require_swmr: bool = True,
 ) -> None:
-    """Update existing Series data starting at a specific position.
-
+    """Update a pandas Series in HDF5 at specified position.
+    
+    Overwrites [start:start+len(series)] and updates logical length
+    to the largest contiguous written extent.
+    
     Args:
-        g: HDF5 group containing the series.
-        s: Series data to write.
+        group: HDF5 group containing existing datasets.
+        series: pandas Series to write.
         start: Starting position for the update.
-        dataset: Name of values dataset.
-        index_dataset: Name of index dataset.
-        require_swmr: Whether to require SWMR mode.
-
+        dataset: Name of the values dataset.
+        index_dataset: Name of the index dataset.
+        require_swmr: If True, assert SWMR mode is enabled.
+        
     Raises:
-        H5SWMRError: If require_swmr=True and file not in SWMR mode.
-        H5SchemaError: If attempting to write incompatible data type.
-        H5DataError: If update would create non-contiguous data.
+        SWMRModeError: If require_swmr=True and SWMR mode not enabled.
+        ValidationError: If validation fails or schema mismatch.
     """
     if require_swmr:
-        assert_swmr_on(g)
-
-    if dataset not in g:
-        raise H5DataError(f"Dataset '{dataset}' not found in group")
-
-    current_len = g.attrs.get("len", 0)
-
-    # Encode data
-    values, values_mask = _encode_values(s)
-
-    n = len(values)
-    end = start + n
-
-    # Check schema compatibility
-    values_kind = g.attrs.get("values_kind")
-    new_values_kind, _ = _get_value_encoding(s)
-    if values_kind != new_values_kind:
-        raise H5SchemaError(
-            f"Cannot update with different value type. "
-            f"Expected {values_kind}, got {new_values_kind}"
-        )
-
-    # Check index compatibility
-    index_kind = g.attrs.get("index_kind", "string_utf8_vlen")
-    if index_kind == "multiindex":
-        if not isinstance(s.index, pd.MultiIndex):
-            raise H5SchemaError(
-                "Cannot update MultiIndex series with simple index"
-            )
-    else:
-        if isinstance(s.index, pd.MultiIndex):
-            raise H5SchemaError(
-                "Cannot update simple index series with MultiIndex"
-            )
-
-    # Resize if needed
-    if g[dataset].shape[0] < end:
-        new_size = max(end, g[dataset].shape[0] * 2)  # Double size
-        g[dataset].resize((new_size,))
-        if f"{dataset}_mask" in g:
-            g[f"{dataset}_mask"].resize((new_size,))
-
-    # Write data
-    g[dataset][start:end] = values
-    if values_mask is not None:
-        g[f"{dataset}_mask"][start:end] = values_mask
-
-    # Handle index data (MultiIndex or simple)
-    if index_kind == "multiindex":
-        _update_multiindex_data(g, s.index, index_dataset, start, end)
-    else:
-        _update_simple_index_data(g, s.index, index_dataset, start, end)
-
-    # Update length to largest contiguous extent
-    # Only allow contiguous writes unless appending at the end
+        assert_swmr_on(group)
+    
+    if len(series) == 0:
+        raise ValidationError("Cannot update with empty series")
+    
+    current_len = group.attrs["len"]
+    end_pos = start + len(series)
+    
+    # Validate that this is a contiguous update
     if start > current_len:
-        raise H5DataError(
-            f"Non-contiguous update: start={start} but current length={current_len}. "
-            "Updates must be contiguous."
-        )
-
-    new_len = max(current_len, end)
-    g.attrs["len"] = new_len
-
+        raise ValidationError(f"Non-contiguous update: start={start}, current_len={current_len}")
+    
+    # Encode data
+    encoded_values, values_mask, values_kind, _ = _encode_values_for_hdf5(series)
+    encoded_index, index_masks, index_metadata, _ = _encode_index_for_hdf5(series.index)
+    
+    # Validate schema compatibility
+    stored_values_kind = group.attrs["values_kind"]
+    if isinstance(stored_values_kind, bytes):
+        stored_values_kind = stored_values_kind.decode("utf-8")
+    if stored_values_kind != values_kind:
+        raise SchemaMismatchError(f"Values kind mismatch: expected {stored_values_kind}, got {values_kind}")
+    
+    expected_multiindex = bool(group.attrs["index_is_multiindex"])
+    actual_multiindex = bool(index_metadata["index_is_multiindex"])
+    if expected_multiindex != actual_multiindex:
+        raise SchemaMismatchError(f"Index type mismatch: expected multiindex={expected_multiindex}, got {actual_multiindex}")
+    
+    # Resize datasets if needed
+    values_dataset = group[dataset]
+    if end_pos > values_dataset.shape[0]:
+        values_dataset.resize((end_pos,))
+        if values_mask is not None:
+            group[f"{dataset}_mask"].resize((end_pos,))
+    
+    # Write values
+    values_dataset[start:end_pos] = encoded_values
+    if values_mask is not None:
+        group[f"{dataset}_mask"][start:end_pos] = values_mask
+    
+    # Write index
+    if expected_multiindex:
+        levels_group = group[f"{index_dataset}/levels"]
+        for i, (level_data, level_mask) in enumerate(zip(encoded_index, index_masks)):
+            level_dataset = levels_group[f"L{i}"]
+            if end_pos > level_dataset.shape[0]:
+                level_dataset.resize((end_pos,))
+                levels_group[f"L{i}_mask"].resize((end_pos,))
+            level_dataset[start:end_pos] = level_data
+            levels_group[f"L{i}_mask"][start:end_pos] = level_mask
+    else:
+        index_group = group[index_dataset]
+        index_values_dataset = index_group["values"]
+        if end_pos > index_values_dataset.shape[0]:
+            index_values_dataset.resize((end_pos,))
+            index_group["index_mask"].resize((end_pos,))
+        index_values_dataset[start:end_pos] = encoded_index
+        index_group["index_mask"][start:end_pos] = index_masks
+    
+    # Update logical length
+    group.attrs["len"] = max(current_len, end_pos)
+    
     if require_swmr:
-        g.file.flush()
+        group.file.flush()
 
 
 def save_series_append(
-    g: h5py.Group,
-    s: pd.Series,
+    group: h5py.Group,
+    series: pd.Series,
     *,
     dataset: str = "values",
     index_dataset: str = "index",
     require_swmr: bool = True,
 ) -> None:
-    """Append Series data at the end of existing data.
-
+    """Append a pandas Series to existing HDF5 datasets.
+    
+    Appends at the end using current logical length.
+    Resizes datasets if needed and updates logical length.
+    
     Args:
-        g: HDF5 group containing the series.
-        s: Series data to append.
-        dataset: Name of values dataset.
-        index_dataset: Name of index dataset.
-        require_swmr: Whether to require SWMR mode.
-
+        group: HDF5 group containing existing datasets.
+        series: pandas Series to append.
+        dataset: Name of the values dataset.
+        index_dataset: Name of the index dataset.
+        require_swmr: If True, assert SWMR mode is enabled.
+        
     Raises:
-        H5SWMRError: If require_swmr=True and file not in SWMR mode.
-        H5SchemaError: If attempting to append incompatible data type.
+        SWMRModeError: If require_swmr=True and SWMR mode not enabled.
+        ValidationError: If validation fails or schema mismatch.
     """
     if require_swmr:
-        assert_swmr_on(g)
-
-    if dataset not in g:
-        raise H5DataError(f"Dataset '{dataset}' not found in group")
-
-    current_len = g.attrs.get("len", 0)
-
-    # Use update starting at current length
+        assert_swmr_on(group)
+    
+    current_len = group.attrs["len"]
     save_series_update(
-        g,
-        s,
-        start=current_len,
-        dataset=dataset,
-        index_dataset=index_dataset,
-        require_swmr=require_swmr,
+        group, series, 
+        start=current_len, 
+        dataset=dataset, index_dataset=index_dataset, 
+        require_swmr=require_swmr
     )
 
 
 def load_series(
-    g: h5py.Group,
+    group: h5py.Group,
     *,
     dataset: str = "values",
     index_dataset: str = "index",
     require_swmr: bool = False,
-) -> pd.Series:  # type: ignore[type-arg]
-    """Load a Series from HDF5.
-
+) -> pd.Series:
+    """Load a pandas Series from HDF5 storage.
+    
+    Reconstructs the Series with original name, index names, order,
+    and missingness. Respects logical length from attributes.
+    
     Args:
-        g: HDF5 group containing the series.
-        dataset: Name of values dataset.
-        index_dataset: Name of index dataset.
-        require_swmr: Whether to require SWMR mode for reading.
-
+        group: HDF5 group containing the Series data.
+        dataset: Name of the values dataset.
+        index_dataset: Name of the index dataset.
+        require_swmr: If True, assert SWMR mode is enabled.
+        
     Returns:
-        The loaded pandas Series.
-
+        Reconstructed pandas Series.
+        
     Raises:
-        H5SWMRError: If require_swmr=True and file not in SWMR mode.
-        H5DataError: If required datasets or attributes are missing.
+        SWMRModeError: If require_swmr=True and SWMR mode not enabled.
+        ValidationError: If data validation fails.
     """
     if require_swmr:
-        assert_swmr_on(g)
-
-    # Get metadata
-    logical_len = g.attrs.get("len")
-    if logical_len is None:
-        raise H5DataError("Missing 'len' attribute")
-
-    series_name = g.attrs.get("series_name", "")
-    if isinstance(series_name, (list, tuple, np.ndarray)):
-        series_name = series_name[0] if len(series_name) > 0 else ""
+        assert_swmr_on(group)
+    
+    logical_length = group.attrs["len"]
+    if logical_length == 0:
+        # Return empty series with proper schema
+        series_name = group.attrs["series_name"]
+        if isinstance(series_name, bytes):
+            series_name = series_name.decode("utf-8")
+        series_name = series_name if series_name else None
+        return pd.Series([], name=series_name, dtype=object)
+    
+    # Decode values and index
+    values, _ = _decode_values_from_hdf5(group, dataset, logical_length)
+    index = _decode_index_from_hdf5(group, index_dataset, logical_length)
+    
+    # Get series name
+    series_name = group.attrs["series_name"]
+    if isinstance(series_name, bytes):
+        series_name = series_name.decode("utf-8")
     series_name = series_name if series_name else None
+    
+    return pd.Series(values, index=index, name=series_name)
 
-    index_name = g.attrs.get("index_name", "")
-    if isinstance(index_name, (list, tuple, np.ndarray)):
-        index_name = index_name[0] if len(index_name) > 0 else ""
-    index_name = index_name if index_name else None
 
-    values_kind = g.attrs.get("values_kind")
-    if not values_kind:
-        raise H5DataError("Missing 'values_kind' attribute")
-
-    # Read values
-    if values_kind == "numeric_float64":
-        values = g[dataset][:logical_len]
-        # No mask for numeric values, NaN represents missing
-    else:  # string_utf8_vlen
-        raw_values = g[dataset][:logical_len]
-        mask = g[f"{dataset}_mask"][:logical_len]
-        # Convert to object array and apply mask, decoding bytes to strings
-        values = np.array(
-            [
-                v.decode("utf-8") if isinstance(v, bytes) and m else (v if m else None)
-                for v, m in zip(raw_values, mask, strict=False)
-            ],
-            dtype=object,
-        )
-
-    # Read index (handle both simple and MultiIndex)
-    index_kind = g.attrs.get("index_kind", "string_utf8_vlen")
-    if index_kind == "multiindex":
-        index = _read_multiindex_from_hdf5(g, index_dataset, logical_len)
-    else:
-        raw_index = g[index_dataset][:logical_len]
-        index_mask = g[f"{index_dataset}_mask"][:logical_len]
-
-        # Decode index
-        index_values: list[str | None] = []
-        for idx_str, valid in zip(raw_index, index_mask, strict=False):
-            if valid:
-                # Decode bytes to string if needed
-                if isinstance(idx_str, bytes):
-                    index_values.append(idx_str.decode("utf-8"))
-                else:
-                    index_values.append(idx_str)
-            else:
-                index_values.append(None)
-
-        index = pd.Index(index_values, name=index_name)
-
-    # Create series
-    series = pd.Series(values, index=index, name=series_name)
-
-    return series
-
+# DataFrame functions - wrappers around Series functionality
 
 def preallocate_frame_layout(
-    g: h5py.Group,
-    df: pd.DataFrame,
+    group: h5py.Group,
+    dataframe: pd.DataFrame,
     *,
-    chunks: tuple[int, ...] = (25,),
+    chunks: Tuple[int, ...] = (25,),
     compression: str = "gzip",
     preallocate: int = 100,
     require_swmr: bool = True,
 ) -> None:
-    """Preallocate HDF5 layout for a DataFrame without writing data.
-
+    """Preallocate HDF5 layout for a pandas DataFrame without writing data.
+    
+    Creates layout for shared index and column series using Series preallocation.
+    
     Args:
-        g: HDF5 group to write to.
-        df: DataFrame providing schema information.
+        group: HDF5 group to write to.
+        dataframe: pandas DataFrame to create layout for.
         chunks: Chunk shape for datasets.
-        compression: Compression type.
-        preallocate: Initial dataset size.
-        require_swmr: Whether to require SWMR mode.
-
+        compression: Compression algorithm.
+        preallocate: Initial allocation size.
+        require_swmr: If True, assert SWMR mode is enabled.
+        
     Raises:
-        H5SWMRError: If require_swmr=True and file not in SWMR mode.
+        SWMRModeError: If require_swmr=True and SWMR mode not enabled.
+        ValidationError: If DataFrame validation fails.
     """
     if require_swmr:
-        assert_swmr_on(g)
-
-    # Store column information (handle both simple and MultiIndex columns)
-    if isinstance(df.columns, pd.MultiIndex):
-        # Store MultiIndex column information
-        column_data = _encode_multiindex(df.columns)
-        g.attrs["columns_is_multiindex"] = True
-        g.attrs["columns_nlevels"] = column_data["nlevels"]
-        g.attrs["columns_level_names"] = json.dumps(column_data["level_names"])
-        g.attrs["columns_level_dtypes"] = json.dumps(column_data["level_dtypes"])
-        
-        # Store level data
-        columns_levels_group = g.create_group("columns_levels")
-        for level_key, level_info in column_data["levels"].items():
-            level_group = columns_levels_group.create_group(level_key)
-            # Convert to bytes for h5py compatibility
-            string_data = [s.encode('utf-8') if s is not None else b'' for s in level_info["values"]]
-            level_group.create_dataset(
-                "values",
-                data=string_data,
-                dtype=h5py.string_dtype(encoding="utf-8"),
-                compression=compression,
-            )
-            level_group.create_dataset(
-                "mask",
-                data=level_info["mask"],
-                dtype=np.uint8,
-                compression=compression,
-            )
-        
-        # Store codes
-        g.create_dataset(
-            "columns_codes",
-            data=np.array(column_data["codes"]),
-            dtype=np.int32,
-            compression=compression,
-        )
-    else:
-        # Simple column index
-        g.attrs["columns_is_multiindex"] = False
-        g.attrs["column_order"] = json.dumps(list(df.columns))
-
-    # Create index group
-    index_group = g.create_group("index")
+        assert_swmr_on(group)
     
-    # Handle index data (MultiIndex or simple)
-    if isinstance(df.index, pd.MultiIndex):
-        _write_multiindex_to_hdf5(index_group, df.index, "index", chunks, compression, preallocate)
-        index_group.attrs["index_kind"] = "multiindex"
-        index_group.attrs["len"] = 0
-        
-        # Create a dummy values dataset for compatibility
-        index_group.create_dataset(
-            "values",
-            shape=(preallocate,),
-            maxshape=(None,),
-            dtype=h5py.string_dtype(encoding="utf-8"),
-            chunks=chunks,
-            compression=compression,
-        )
-        index_group.create_dataset(
-            "values_mask",
-            shape=(preallocate,),
-            maxshape=(None,),
-            dtype=np.uint8,
-            chunks=chunks,
-            compression=compression,
-            fillvalue=0,
-        )
-    else:
-        # Simple index
-        _write_simple_index_to_hdf5(index_group, df.index, "values", chunks, compression, preallocate)
-        index_group.attrs["index_kind"] = "string_utf8_vlen"
-        index_group.attrs["len"] = 0
-        index_group.attrs["index_name"] = df.index.name if df.index.name is not None else ""
-
-    # Create columns group
-    columns_group = g.create_group("columns")
-
-    # Preallocate each column
-    for i, col in enumerate(df.columns):
-        # For MultiIndex columns, use index as group name since tuples can't be group names
-        col_group_name = f"col_{i}" if isinstance(df.columns, pd.MultiIndex) else str(col)
-        col_group = columns_group.create_group(col_group_name)
+    if len(dataframe.columns) == 0:
+        raise ValidationError("Cannot preallocate layout for DataFrame with no columns")
+    
+    # Set frame attributes
+    group.attrs["column_order"] = json.dumps(list(dataframe.columns))
+    group.attrs["len"] = 0
+    
+    # Preallocate index layout
+    index_group = group.create_group("index")
+    # Create a dummy series with string values to match the schema
+    dummy_series = pd.Series([], dtype=str, index=dataframe.index[:0], name='__index__')
+    preallocate_series_layout(
+        index_group, dummy_series,
+        dataset="values", index_dataset="index",
+        chunks=chunks, compression=compression, 
+        preallocate=preallocate, require_swmr=require_swmr
+    )
+    
+    # Preallocate column layouts
+    columns_group = group.create_group("columns")
+    for col_name in dataframe.columns:
+        col_group = columns_group.create_group(str(col_name))
+        # Create dummy series with the same dtype as the column
+        col_dtype = dataframe[col_name].dtype
+        dummy_col_series = pd.Series([], dtype=col_dtype, index=dataframe.index[:0], name=col_name)
         
         preallocate_series_layout(
-            col_group,
-            df[col][:0],  # Empty slice for schema
-            chunks=chunks,
-            compression=compression,
-            preallocate=preallocate,
-            require_swmr=require_swmr,
+            col_group, dummy_col_series,
+            dataset="values", index_dataset="index",
+            chunks=chunks, compression=compression,
+            preallocate=preallocate, require_swmr=require_swmr
         )
-
-        # Store categories for categorical columns
-        if isinstance(df[col].dtype, pd.CategoricalDtype):
-            categories = df[col].cat.categories.tolist()
-            col_group.attrs["categories"] = json.dumps([str(c) for c in categories])
-        
-        # Store column information for reference
-        if isinstance(df.columns, pd.MultiIndex):
-            col_group.attrs["column_tuple"] = json.dumps([str(x) for x in col])
-        else:
-            col_group.attrs["column_name"] = str(col)
-
+    
     if require_swmr:
-        g.file.flush()
+        group.file.flush()
 
 
 def save_frame_new(
-    g: h5py.Group,
-    df: pd.DataFrame,
+    group: h5py.Group,
+    dataframe: pd.DataFrame,
     *,
-    chunks: tuple[int, ...] = (25,),
+    chunks: Tuple[int, ...] = (25,),
     compression: str = "gzip",
     preallocate: int = 100,
     require_swmr: bool = True,
 ) -> None:
-    """Save a new DataFrame to HDF5.
-
+    """Create datasets and write a pandas DataFrame to HDF5.
+    
     Args:
-        g: HDF5 group to write to.
-        df: DataFrame to save.
-        chunks: Chunk shape for datasets.
-        compression: Compression type.
-        preallocate: Initial dataset size.
-        require_swmr: Whether to require SWMR mode.
-
+        group: HDF5 group to write to.
+        dataframe: pandas DataFrame to persist.
+        chunks: Chunk shape for new datasets.
+        compression: Compression algorithm for new datasets.
+        preallocate: Initial allocation size for new datasets.
+        require_swmr: If True, assert SWMR mode is enabled.
+        
     Raises:
-        H5SWMRError: If require_swmr=True and file not in SWMR mode.
-        H5DataError: If dataframe is empty.
+        SWMRModeError: If require_swmr=True and SWMR mode not enabled.
+        ValidationError: If DataFrame validation fails.
     """
     if require_swmr:
-        assert_swmr_on(g)
-
-    if len(df) == 0:
-        raise H5DataError("Cannot save empty dataframe")
-
-    # Preallocate if needed
-    if "columns" not in g:
-        preallocate_frame_layout(
-            g,
-            df,
-            chunks=chunks,
-            compression=compression,
-            preallocate=max(preallocate, len(df)),
-            require_swmr=require_swmr,
-        )
-
-    # Save index data
-    index_group = g["index"]
-    n = len(df)
-
-    # Handle index data (MultiIndex or simple)
-    index_kind = index_group.attrs.get("index_kind", "string_utf8_vlen")
-    if index_kind == "multiindex":
-        _update_multiindex_data(index_group, df.index, "index", 0, n)
-    else:
-        _update_simple_index_data(index_group, df.index, "values", 0, n)  # Use "values" not "index"
+        assert_swmr_on(group)
     
-    index_group.attrs["len"] = n
-
-    # Save each column
-    for i, col in enumerate(df.columns):
-        col_group_name = f"col_{i}" if isinstance(df.columns, pd.MultiIndex) else str(col)
-        col_group = g["columns"][col_group_name]
-        save_series_new(
-            col_group,
-            df[col],
-            chunks=chunks,
-            compression=compression,
-            preallocate=preallocate,
-            require_swmr=require_swmr,
-        )
-
-    if require_swmr:
-        g.file.flush()
+    if len(dataframe) == 0:
+        raise ValidationError("Cannot save empty DataFrame")
+    
+    # Check if layout already exists (preallocated)
+    if "columns" in group and group.attrs.get("len", -1) == 0:
+        save_frame_update(group, dataframe, start=0, require_swmr=require_swmr)
+        return
+    
+    # Create new layout
+    preallocate_frame_layout(
+        group, dataframe,
+        chunks=chunks, compression=compression,
+        preallocate=max(preallocate, len(dataframe)),
+        require_swmr=require_swmr
+    )
+    
+    # Write the data
+    save_frame_update(group, dataframe, start=0, require_swmr=require_swmr)
 
 
 def save_frame_update(
-    g: h5py.Group, df: pd.DataFrame, *, start: int = 0, require_swmr: bool = True
+    group: h5py.Group,
+    dataframe: pd.DataFrame,
+    *,
+    start: int = 0,
+    require_swmr: bool = True,
 ) -> None:
-    """Update existing DataFrame data starting at a specific position.
-
+    """Update a pandas DataFrame in HDF5 at specified position.
+    
     Args:
-        g: HDF5 group containing the dataframe.
-        df: DataFrame data to write.
+        group: HDF5 group containing existing datasets.
+        dataframe: pandas DataFrame to write.
         start: Starting position for the update.
-        require_swmr: Whether to require SWMR mode.
-
+        require_swmr: If True, assert SWMR mode is enabled.
+        
     Raises:
-        H5SWMRError: If require_swmr=True and file not in SWMR mode.
-        H5DataError: If columns don't match.
+        SWMRModeError: If require_swmr=True and SWMR mode not enabled.
+        ValidationError: If validation fails or schema mismatch.
     """
     if require_swmr:
-        assert_swmr_on(g)
-
-    # Validate columns match
-    columns_is_multiindex = g.attrs.get("columns_is_multiindex", False)
-    if columns_is_multiindex:
-        if not isinstance(df.columns, pd.MultiIndex):
-            raise H5DataError(
-                "Cannot update DataFrame with MultiIndex columns using simple columns"
-            )
-        # For MultiIndex, validate the structure matches
-        stored_nlevels = g.attrs.get("columns_nlevels")
-        if df.columns.nlevels != stored_nlevels:
-            raise H5DataError(
-                f"Column MultiIndex level mismatch. Expected {stored_nlevels} levels, got {df.columns.nlevels}"
-            )
-    else:
-        if isinstance(df.columns, pd.MultiIndex):
-            raise H5DataError(
-                "Cannot update DataFrame with simple columns using MultiIndex columns"
-            )
-        stored_columns = json.loads(g.attrs.get("column_order", "[]"))
-        if list(df.columns) != stored_columns:
-            raise H5DataError(
-                f"Column mismatch. Expected {stored_columns}, got {list(df.columns)}"
-            )
-
-    # Update index
-    index_group = g["index"]
-    n = len(df)
-    end = start + n
-
-    # Handle index data (MultiIndex or simple)
-    index_kind = index_group.attrs.get("index_kind", "string_utf8_vlen")
-    if index_kind == "multiindex":
-        _update_multiindex_data(index_group, df.index, "index", start, end)
-    else:
-        _update_simple_index_data(index_group, df.index, "values", start, end)  # Use "values" not "index"
-
-    # Update length
-    current_len = index_group.attrs.get("len", 0)
+        assert_swmr_on(group)
+    
+    if len(dataframe) == 0:
+        raise ValidationError("Cannot update with empty DataFrame")
+    
+    current_len = group.attrs["len"]
+    end_pos = start + len(dataframe)
+    
+    # Validate contiguous update
     if start > current_len:
-        raise H5DataError(
-            f"Non-contiguous update: start={start} but current length={current_len}"
-        )
-    index_group.attrs["len"] = max(current_len, end)
-
+        raise ValidationError(f"Non-contiguous update: start={start}, current_len={current_len}")
+    
+    # Validate column order matches
+    column_order_attr = group.attrs["column_order"]
+    if isinstance(column_order_attr, bytes):
+        column_order_attr = column_order_attr.decode("utf-8")
+    stored_columns = json.loads(column_order_attr)
+    if list(dataframe.columns) != stored_columns:
+        raise SchemaMismatchError(f"Column order mismatch: expected {stored_columns}, got {list(dataframe.columns)}")
+    
+    # Update index - create a dummy series to represent the actual index
+    # We need to store the index structure, so we create a dummy series where the 
+    # index is the actual DataFrame index and values are just placeholders
+    index_series = pd.Series(['dummy'] * len(dataframe), index=dataframe.index, name='__index__')
+    save_series_update(
+        group["index"], index_series,
+        start=start, dataset="values", index_dataset="index",
+        require_swmr=require_swmr
+    )
+    
     # Update each column
-    for i, col in enumerate(df.columns):
-        col_group_name = f"col_{i}" if isinstance(df.columns, pd.MultiIndex) else str(col)
-        col_group = g["columns"][col_group_name]
-        save_series_update(col_group, df[col], start=start, require_swmr=require_swmr)
-
+    columns_group = group["columns"]
+    for col_name in dataframe.columns:
+        col_series = dataframe[col_name]
+        col_series.name = col_name
+        save_series_update(
+            columns_group[str(col_name)], col_series,
+            start=start, dataset="values", index_dataset="index",
+            require_swmr=require_swmr
+        )
+    
+    # Update frame length
+    group.attrs["len"] = max(current_len, end_pos)
+    
     if require_swmr:
-        g.file.flush()
+        group.file.flush()
 
 
 def save_frame_append(
-    g: h5py.Group, df: pd.DataFrame, *, require_swmr: bool = True
+    group: h5py.Group,
+    dataframe: pd.DataFrame,
+    *,
+    require_swmr: bool = True,
 ) -> None:
-    """Append DataFrame data at the end of existing data.
-
-    Args:
-        g: HDF5 group containing the dataframe.
-        df: DataFrame data to append.
-        require_swmr: Whether to require SWMR mode.
-
-    Raises:
-        H5SWMRError: If require_swmr=True and file not in SWMR mode.
-    """
-    if require_swmr:
-        assert_swmr_on(g)
-
-    # Get current length from index
-    current_len = g["index"].attrs.get("len", 0)
-
-    # Use update starting at current length
-    save_frame_update(g, df, start=current_len, require_swmr=require_swmr)
-
-
-def load_frame(g: h5py.Group, *, require_swmr: bool = False) -> pd.DataFrame:
-    """Load a DataFrame from HDF5.
-
-    Args:
-        g: HDF5 group containing the dataframe.
-        require_swmr: Whether to require SWMR mode for reading.
-
-    Returns:
-        The loaded pandas DataFrame.
-
-    Raises:
-        H5SWMRError: If require_swmr=True and file not in SWMR mode.
-        H5DataError: If required groups or attributes are missing.
-    """
-    if require_swmr:
-        assert_swmr_on(g)
-
-    # Load index
-    index_group = g["index"]
-    logical_len = index_group.attrs.get("len", 0)
-
-    # Handle index (MultiIndex or simple)
-    index_kind = index_group.attrs.get("index_kind", "string_utf8_vlen")
-    if index_kind == "multiindex":
-        index = _read_multiindex_from_hdf5(index_group, "index", logical_len)
-    else:
-        raw_index = index_group["values"][:logical_len]
-        index_mask = index_group["values_mask"][:logical_len]
-
-        # Decode index
-        index_values: list[str | None] = []
-        for idx_str, valid in zip(raw_index, index_mask, strict=False):
-            if valid:
-                # Decode bytes to string if needed
-                if isinstance(idx_str, bytes):
-                    index_values.append(idx_str.decode("utf-8"))
-                else:
-                    index_values.append(idx_str)
-            else:
-                index_values.append(None)
-
-        index = pd.Index(index_values, name=index_group.attrs.get("index_name", None))
-
-    # Load columns
-    columns_is_multiindex = g.attrs.get("columns_is_multiindex", False)
+    """Append a pandas DataFrame to existing HDF5 datasets.
     
-    if columns_is_multiindex:
-        # Reconstruct MultiIndex columns
-        nlevels = g.attrs["columns_nlevels"]
-        level_names = json.loads(g.attrs["columns_level_names"])
+    Args:
+        group: HDF5 group containing existing datasets.
+        dataframe: pandas DataFrame to append.
+        require_swmr: If True, assert SWMR mode is enabled.
         
-        # Read level data
-        levels = []
-        columns_levels_group = g["columns_levels"]
-        for i in range(nlevels):
-            level_group = columns_levels_group[f"level_{i}"]
-            level_values = level_group["values"][:]
-            level_mask = level_group["mask"][:]
-            
-            # Decode level values
-            decoded_values = []
-            for val, valid in zip(level_values, level_mask, strict=False):
-                if valid:
-                    if isinstance(val, bytes):
-                        decoded_values.append(val.decode("utf-8"))
-                    else:
-                        decoded_values.append(val)
-                else:
-                    decoded_values.append(None)
-            
-            levels.append(pd.Index(decoded_values))
-        
-        # Read codes
-        codes_data = g["columns_codes"][:]
-        codes = [codes_data[i] for i in range(nlevels)]
-        
-        # Convert empty names back to None
-        names = [name if name else None for name in level_names]
-        
-        columns = pd.MultiIndex(levels=levels, codes=codes, names=names)
-        
-        # Load column data
-        data = {}
-        for i, col in enumerate(columns):
-            col_group = g["columns"][f"col_{i}"]
-            series = load_series(col_group, require_swmr=require_swmr)
-            data[col] = series.values
-    else:
-        # Simple columns
-        column_order = json.loads(g.attrs.get("column_order", "[]"))
-        if not column_order:
-            raise H5DataError("Missing or empty 'column_order' attribute")
-        
-        columns = column_order
-        
-        # Load column data
-        data = {}
-        for col in column_order:
-            col_group = g["columns"][str(col)]
-            series = load_series(col_group, require_swmr=require_swmr)
-            data[col] = series.values
+    Raises:
+        SWMRModeError: If require_swmr=True and SWMR mode not enabled.
+        ValidationError: If validation fails or schema mismatch.
+    """
+    if require_swmr:
+        assert_swmr_on(group)
+    
+    current_len = group.attrs["len"]
+    save_frame_update(group, dataframe, start=current_len, require_swmr=require_swmr)
 
-    # Create dataframe
-    df = pd.DataFrame(data, index=index, columns=columns)
 
-    return df
+def load_frame(
+    group: h5py.Group,
+    *,
+    require_swmr: bool = False,
+) -> pd.DataFrame:
+    """Load a pandas DataFrame from HDF5 storage.
+    
+    Args:
+        group: HDF5 group containing the DataFrame data.
+        require_swmr: If True, assert SWMR mode is enabled.
+        
+    Returns:
+        Reconstructed pandas DataFrame.
+        
+    Raises:
+        SWMRModeError: If require_swmr=True and SWMR mode not enabled.
+        ValidationError: If data validation fails.
+    """
+    if require_swmr:
+        assert_swmr_on(group)
+    
+    logical_length = group.attrs["len"]
+    if logical_length == 0:
+        # Return empty DataFrame with proper schema
+        column_order_attr = group.attrs["column_order"]
+        if isinstance(column_order_attr, bytes):
+            column_order_attr = column_order_attr.decode("utf-8")
+        column_order = json.loads(column_order_attr)
+        return pd.DataFrame(columns=column_order)
+    
+    # Load index
+    index = _decode_index_from_hdf5(group["index"], "index", logical_length)
+    
+    # Load columns in order
+    column_order_attr = group.attrs["column_order"]
+    if isinstance(column_order_attr, bytes):
+        column_order_attr = column_order_attr.decode("utf-8")
+    column_order = json.loads(column_order_attr)
+    columns_group = group["columns"]
+    
+    columns_data = {}
+    for col_name in column_order:
+        col_series = load_series(
+            columns_group[str(col_name)],
+            dataset="values", index_dataset="index",
+            require_swmr=require_swmr
+        )
+        columns_data[col_name] = col_series.values
+    
+    # Reconstruct DataFrame
+    dataframe = pd.DataFrame(columns_data, index=index)
+    return dataframe[column_order]  # Ensure column order

@@ -1,18 +1,15 @@
 # pandas2hdf
 
-Robust round-trip persistence between pandas Series/DataFrame and HDF5 with SWMR (Single Writer Multiple Readers) support.
+Robust round-trip persistence between pandas Series/DataFrame and HDF5 with SWMR (Single Writer Multiple Reader) support.
 
 ## Features
 
-- **Round-trip persistence**: Save and load pandas Series and DataFrames to/from HDF5 files while preserving data types, order, and missing values
-- **SWMR support**: Full support for HDF5's Single Writer Multiple Readers mode for concurrent access
-- **Type safety**: Comprehensive type hints with mypy strict mode compatibility
-- **Flexible encoding**:
-  - Numeric and boolean types → float64
-  - String and categorical types → UTF-8 variable-length strings
-  - Missing values handled via NaN (numeric) or mask arrays (strings)
-- **Efficient storage**: Chunked, compressed datasets with preallocation support
-- **Schema validation**: Ensures data consistency across write operations
+- **Complete round-trip fidelity**: Preserves data types, index structure, names, and missing values
+- **SWMR support**: Enables concurrent reading while writing with HDF5's Single Writer Multiple Reader mode
+- **Flexible write modes**: Preallocate, new, update, and append operations
+- **MultiIndex support**: Full support for pandas MultiIndex with proper reconstruction
+- **Type safety**: Comprehensive type hints and strict mypy compliance
+- **Comprehensive testing**: Extensive test suite covering edge cases and real-world scenarios
 
 ## Installation
 
@@ -20,14 +17,9 @@ Robust round-trip persistence between pandas Series/DataFrame and HDF5 with SWMR
 pip install pandas2hdf
 ```
 
-For development:
-```bash
-pip install pandas2hdf[dev]
-```
-
 ## Quick Start
 
-### Basic Series Round-trip
+### Basic Series Operations
 
 ```python
 import pandas as pd
@@ -35,17 +27,23 @@ import h5py
 from pandas2hdf import save_series_new, load_series
 
 # Create a pandas Series
-series = pd.Series([1, 2, 3, 4, 5], index=['a', 'b', 'c', 'd', 'e'], name='my_data')
+series = pd.Series([1, 2, 3, None, 5], 
+                  index=['a', 'b', 'c', 'd', 'e'], 
+                  name='my_data')
 
-# Save to HDF5
-with h5py.File('data.h5', 'w') as f:
-    group = f.create_group('series1')
-    save_series_new(group, series, require_swmr=False)
+# Save to HDF5 with SWMR support
+with h5py.File('data.h5', 'w', libver='latest') as f:
+    f.swmr_mode = True
+    group = f.create_group('my_series')
+    save_series_new(group, series, require_swmr=True)
 
 # Load from HDF5
-with h5py.File('data.h5', 'r') as f:
-    loaded_series = load_series(f['series1'])
-    print(loaded_series)
+with h5py.File('data.h5', 'r', swmr=True) as f:
+    group = f['my_series']
+    loaded_series = load_series(group)
+
+print(loaded_series)
+# Output preserves original data, index, and name
 ```
 
 ### DataFrame Operations
@@ -55,156 +53,159 @@ import pandas as pd
 import h5py
 from pandas2hdf import save_frame_new, load_frame
 
-# Create a DataFrame
+# Create a DataFrame with mixed types
 df = pd.DataFrame({
-    'integers': [1, 2, 3, 4, 5],
-    'floats': [1.1, 2.2, 3.3, 4.4, 5.5],
-    'strings': ['a', 'b', 'c', 'd', 'e'],
-    'booleans': [True, False, True, False, True]
+    'integers': [1, 2, 3, None],
+    'floats': [1.1, 2.2, 3.3, 4.4],
+    'strings': ['apple', 'banana', None, 'date'],
+    'booleans': [True, False, True, None]
 })
 
-# Save to HDF5
-with h5py.File('data.h5', 'w') as f:
-    group = f.create_group('dataframe1')
-    save_frame_new(group, df, require_swmr=False)
+# Save DataFrame
+with h5py.File('dataframe.h5', 'w', libver='latest') as f:
+    f.swmr_mode = True
+    group = f.create_group('my_dataframe')
+    save_frame_new(group, df, require_swmr=True)
 
-# Load from HDF5
-with h5py.File('data.h5', 'r') as f:
-    loaded_df = load_frame(f['dataframe1'])
-    print(loaded_df)
+# Load DataFrame
+with h5py.File('dataframe.h5', 'r', swmr=True) as f:
+    group = f['my_dataframe']
+    loaded_df = load_frame(group)
+
+print(loaded_df)
 ```
 
-### SWMR Workflow
+### SWMR Workflow with Incremental Updates
 
 ```python
 import pandas as pd
 import h5py
-from pandas2hdf import save_series_new, save_series_append, load_series
+from pandas2hdf import (
+    preallocate_series_layout, 
+    save_series_new, 
+    save_series_append,
+    load_series
+)
 
-# Create file with SWMR mode
-with h5py.File('swmr_data.h5', 'w', libver='latest') as f:
-    group = f.create_group('timeseries')
-    f.swmr_mode = True  # Enable SWMR mode
+# Writer process
+with h5py.File('timeseries.h5', 'w', libver='latest') as f:
+    f.swmr_mode = True
+    group = f.create_group('data')
     
-    # Initial data
-    initial_data = pd.Series([1, 2, 3], name='values')
+    # Preallocate space for efficient appending
+    initial_data = pd.Series([1.0, 2.0], name='measurements')
+    preallocate_series_layout(group, initial_data, preallocate=10000)
+    
+    # Write initial data
     save_series_new(group, initial_data, require_swmr=True)
+    
+    # Append new data incrementally
+    for i in range(10):
+        new_data = pd.Series([float(i + 3)], name='measurements')
+        save_series_append(group, new_data, require_swmr=True)
+        f.flush()  # Make data visible to readers
 
-# Append data (writer)
-with h5py.File('swmr_data.h5', 'r+', swmr=True) as f:
-    new_data = pd.Series([4, 5, 6], name='values')
-    save_series_append(f['timeseries'], new_data, require_swmr=True)
-
-# Concurrent reader
-with h5py.File('swmr_data.h5', 'r', swmr=True) as f:
-    series = load_series(f['timeseries'], require_swmr=True)
-    print(series)  # Shows all 6 values
+# Concurrent reader process
+with h5py.File('timeseries.h5', 'r', swmr=True) as f:
+    group = f['data']
+    current_data = load_series(group)
+    print(f"Current length: {len(current_data)}")
 ```
 
 ## API Reference
 
-### Core Functions
+### Series Functions
 
-#### Series Operations
+- `preallocate_series_layout()`: Create resizable datasets without writing data
+- `save_series_new()`: Create new datasets and write Series data  
+- `save_series_update()`: Update Series data at specified position
+- `save_series_append()`: Append Series data to end of existing datasets
+- `load_series()`: Load Series from HDF5 storage
 
-- `preallocate_series_layout(g, s, *, dataset="values", index_dataset="index", chunks=(25,), compression="gzip", preallocate=100, require_swmr=True)` - Preallocate HDF5 layout without writing data
-- `save_series_new(g, s, *, ...)` - Save a new Series, creating datasets or reusing preallocated layout
-- `save_series_update(g, s, *, start=0, ...)` - Update existing Series data at specific position
-- `save_series_append(g, s, *, ...)` - Append Series data at the end
-- `load_series(g, *, dataset="values", index_dataset="index", require_swmr=False)` - Load a Series from HDF5
+### DataFrame Functions
 
-#### DataFrame Operations
+- `preallocate_frame_layout()`: Create resizable layout for DataFrame
+- `save_frame_new()`: Create new datasets and write DataFrame  
+- `save_frame_update()`: Update DataFrame data at specified position
+- `save_frame_append()`: Append DataFrame data to existing datasets
+- `load_frame()`: Load DataFrame from HDF5 storage
 
-- `preallocate_frame_layout(g, df, *, ...)` - Preallocate layout for DataFrame
-- `save_frame_new(g, df, *, ...)` - Save a new DataFrame
-- `save_frame_update(g, df, *, start=0, ...)` - Update existing DataFrame data
-- `save_frame_append(g, df, *, ...)` - Append DataFrame data
-- `load_frame(g, *, require_swmr=False)` - Load a DataFrame from HDF5
+### Utility Functions
 
-#### Utilities
-
-- `assert_swmr_on(g)` - Assert that the HDF5 file is in SWMR mode
+- `assert_swmr_on()`: Assert that SWMR mode is enabled on a file
 
 ## Data Type Handling
 
-| pandas dtype | HDF5 storage | Round-trip dtype |
-|-------------|--------------|------------------|
-| int32/64    | float64      | float64          |
-| float32/64  | float64      | float64          |
-| bool        | float64      | float64          |
-| object/string | UTF-8 vlen  | object           |
-| category    | UTF-8 vlen   | object (as strings) |
-| datetime    | UTF-8 vlen   | object (ISO format) |
+### Values
+- **Numeric types** (int, float): Stored as float64 with NaN for missing values
+- **Boolean**: Converted to float64 (True=1.0, False=0.0) with NaN for missing
+- **Strings**: Stored as UTF-8 variable-length strings with separate mask for missing values
 
-## HDF5 Layout
+### Index
+- **All index types**: Converted to UTF-8 strings for consistent storage
+- **MultiIndex**: Each level stored separately with proper reconstruction metadata
+- **Missing values**: Handled via mask arrays for all index levels
 
-### Series Layout
-```
-/my_series
-  attrs: {series_name, len, values_kind, index_kind, ...}
-  /values        (float64 or vlen str)
-  /values_mask   (uint8, only for strings)
-  /index         (vlen str)
-  /index_mask    (uint8)
-```
+## SWMR (Single Writer Multiple Reader) Support
 
-### DataFrame Layout
-```
-/my_frame
-  attrs: {column_order: JSON list}
-  /index/values
-  /index/values_mask
-  /columns/
-    /column1/...  (series layout)
-    /column2/...  (series layout)
+pandas2hdf is designed for SWMR workflows where one process writes data while multiple processes read concurrently:
+
+```python
+# Writer process
+with h5py.File('data.h5', 'w', libver='latest') as f:
+    f.swmr_mode = True  # Enable SWMR mode
+    # ... write operations with require_swmr=True
+
+# Reader processes  
+with h5py.File('data.h5', 'r', swmr=True) as f:
+    # ... read operations (automatically see new data after writer flushes)
 ```
 
-## Development
+### SWMR Requirements
+- Use `libver='latest'` when creating files
+- Set `swmr_mode = True` on writer file handle
+- Use `require_swmr=True` for write operations (validates SWMR is enabled)
+- Call `file.flush()` after writes to make data visible to readers
+- Open reader files with `swmr=True`
 
-### Setup
+## Error Handling
+
+The library provides specific exception types:
+
+- `SWMRModeError`: SWMR mode required but not enabled
+- `SchemaMismatchError`: Data doesn't match existing schema
+- `ValidationError`: General data validation errors
+
+## Performance Considerations
+
+- **Chunking**: Default chunk size is (25,) - adjust based on access patterns
+- **Compression**: gzip compression enabled by default
+- **Preallocation**: Specify expected size to avoid frequent resizing
+- **SWMR**: Minimal overhead for concurrent reading
+
+## Testing
+
+Run the comprehensive test suite:
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/pandas2hdf.git
-cd pandas2hdf
-
-# Install with development dependencies
-pip install -e ".[dev]"
+pytest tests/
 ```
 
-### Running Tests
-
-```bash
-# Run all tests
-pytest
-
-# Run with coverage
-pytest --cov=pandas2hdf --cov-report=html
-
-# Run specific test file
-pytest tests/test_pandas2hdf.py::TestSeriesRoundTrip
-```
-
-### Code Quality
-
-```bash
-# Format code
-black src tests
-
-# Lint
-ruff check src tests
-
-# Type checking
-mypy src
-```
+The tests cover:
+- Round-trip fidelity for all supported data types
+- MultiIndex handling
+- All write modes (preallocate, new, update, append)  
+- SWMR workflows and concurrent access
+- Error conditions and edge cases
+- Performance with large datasets
 
 ## Requirements
 
 - Python ≥ 3.10
 - pandas ≥ 1.5.0
-- numpy ≥ 1.21.0
 - h5py ≥ 3.7.0
+- numpy ≥ 1.21.0
 
 ## License
 
-MIT License - see LICENSE file for details.
+This project is licensed under the MIT License - see the LICENSE file for details.

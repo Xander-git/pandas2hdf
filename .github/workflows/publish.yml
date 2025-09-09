@@ -1,0 +1,61 @@
+name: Publish to PyPI
+
+on:
+  workflow_run:
+    workflows: ["Tests"]
+    types:
+      - completed
+    branches:
+      - main
+  release:
+    types: [published]
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'release' || github.event_name == 'workflow_dispatch' }}
+    environment:
+      name: pypi
+      url: https://pypi.org/p/pandas2hdf
+    permissions:
+      id-token: write  # IMPORTANT: this permission is mandatory for trusted publishing
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        # Fetch full history for proper version tagging
+        fetch-depth: 0
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.10"
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v3
+      with:
+        version: "latest"
+
+    - name: Install build dependencies
+      run: |
+        uv sync --dev
+
+    - name: Build package
+      run: |
+        uv run python -m build
+
+    - name: Check package
+      run: |
+        uv run twine check dist/*
+
+    - name: Publish to Test PyPI (for testing)
+      if: github.event_name == 'workflow_dispatch'
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        repository-url: https://test.pypi.org/legacy/
+        skip-existing: true
+
+    - name: Publish to PyPI
+      if: github.event_name == 'release' || (github.event_name == 'workflow_run' && github.ref == 'refs/heads/main')
+      uses: pypa/gh-action-pypi-publish@release/v1

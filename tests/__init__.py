@@ -1,1 +1,1 @@
-"""Tests for pandas2hdf package."""
+"""Test suite for pandas2hdf."""
