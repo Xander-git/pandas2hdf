@@ -69,9 +69,25 @@ def _encode_values_for_hdf5(
         encoded = values.astype(np.float64).values
         mask = None
         values_kind = "numeric_float64"
-    elif pd.api.types.is_string_dtype(values.dtype) or pd.api.types.is_object_dtype(
-        values.dtype
-    ):
+    elif pd.api.types.is_object_dtype(values.dtype):
+        # Check if object dtype contains boolean-like values
+        non_null_values = values.dropna()
+        if (len(non_null_values) > 0 and 
+            all(isinstance(v, (bool, np.bool_)) or v in (True, False) for v in non_null_values)):
+            # Treat as boolean/numeric data
+            encoded = values.astype(np.float64).values
+            mask = None
+            values_kind = "numeric_float64"
+        else:
+            # Treat as string data
+            str_values = values.astype(str)
+            mask = (~values.isna()).astype(np.uint8)
+            # Replace NaN string representations with empty strings
+            str_array = str_values.values
+            str_array[values.isna()] = ""
+            encoded = str_array.astype(_get_string_dtype())
+            values_kind = "string_utf8_vlen"
+    elif pd.api.types.is_string_dtype(values.dtype):
         # Convert to UTF-8 strings with mask for missing values
         str_values = values.astype(str)
         mask = (~values.isna()).astype(np.uint8)
@@ -636,9 +652,16 @@ def preallocate_frame_layout(
     columns_group = group.create_group("columns")
     for col_name in dataframe.columns:
         col_group = columns_group.create_group(str(col_name))
-        # Create dummy series with the same dtype as the column
-        col_dtype = dataframe[col_name].dtype
-        dummy_col_series = pd.Series([], dtype=col_dtype, index=dataframe.index[:0], name=col_name)
+        # Create dummy series - use actual data to determine schema if available
+        if len(dataframe) > 0:
+            # Use first few values to determine the proper schema
+            col_data = dataframe[col_name]
+            dummy_col_series = pd.Series([col_data.iloc[0]] if not col_data.isna().iloc[0] else [None], 
+                                        dtype=col_data.dtype, index=dataframe.index[:1], name=col_name)
+        else:
+            # Fallback to dtype for empty dataframe
+            col_dtype = dataframe[col_name].dtype
+            dummy_col_series = pd.Series([], dtype=col_dtype, index=dataframe.index[:0], name=col_name)
         
         preallocate_series_layout(
             col_group, dummy_col_series,
