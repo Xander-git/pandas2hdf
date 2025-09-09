@@ -39,7 +39,7 @@ jobs:
 
     - name: Install build dependencies
       run: |
-        uv sync --dev
+        uv sync --group dev
 
     - name: Build package
       run: |
