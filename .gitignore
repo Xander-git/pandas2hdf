@@ -10,3 +10,4 @@
 *.pyzwz
 *.pyzwzw
 *.pyzwzwz
+**.cursor/ */

@@ -848,7 +848,7 @@ dependencies = [
     { name = "pandas" },
 ]
 
-[package.optional-dependencies]
+[package.dev-dependencies]
 dev = [
     { name = "black" },
     { name = "build" },
@@ -860,36 +860,23 @@ dev = [
     { name = "twine" },
 ]
 
-[package.dev-dependencies]
-dev = [
-    { name = "black" },
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
 [package.metadata]
 requires-dist = [
-    { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
-    { name = "build", marker = "extra == 'dev'", specifier = ">=0.10.0" },
     { name = "h5py", specifier = ">=3.7.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "numpy", specifier = ">=1.21.0" },
     { name = "pandas", specifier = ">=1.5.0" },
-    { name = "pandas-stubs", marker = "extra == 'dev'", specifier = ">=1.5.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
-    { name = "twine", marker = "extra == 'dev'", specifier = ">=4.0.0" },
 ]
-provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "black", specifier = ">=25.1.0" },
+    { name = "build", specifier = ">=0.10.0" },
     { name = "mypy", specifier = ">=1.17.1" },
+    { name = "pandas-stubs", specifier = ">=1.5.0" },
     { name = "pytest", specifier = ">=8.4.2" },
+    { name = "pytest-cov", specifier = ">=4.0.0" },
     { name = "ruff", specifier = ">=0.12.12" },
+    { name = "twine", specifier = ">=4.0.0" },
 ]
 
 [[package]]
