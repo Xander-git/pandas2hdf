@@ -42,11 +42,11 @@ def assert_swmr_on(g: h5py.Group) -> None:
 
 def _get_string_dtype(length: int | None = None) -> h5py.special_dtype:
     """Get UTF-8 string dtype for HDF5.
-    
+
     Args:
         length: If None, returns variable-length string dtype.
                 If an integer, returns fixed-length string dtype with that character length.
-    
+
     Returns:
         HDF5 string dtype (variable-length or fixed-length).
     """
@@ -59,11 +59,11 @@ def _get_string_dtype(length: int | None = None) -> h5py.special_dtype:
 
 def _pad_or_truncate_string(s: str, fixed_length: int) -> str:
     """Pad or truncate a string to a fixed character length.
-    
+
     Args:
         s: Input string.
         fixed_length: Target character length.
-    
+
     Returns:
         String padded with spaces or truncated to exactly fixed_length characters.
     """
@@ -78,14 +78,16 @@ def _pad_or_truncate_string(s: str, fixed_length: int) -> str:
         return s
 
 
-def _apply_fixed_length_to_strings(str_array: np.ndarray, mask: np.ndarray, fixed_length: int) -> np.ndarray:
+def _apply_fixed_length_to_strings(
+    str_array: np.ndarray, mask: np.ndarray, fixed_length: int
+) -> np.ndarray:
     """Apply fixed-length padding/truncation to string array.
-    
+
     Args:
         str_array: Array of strings.
         mask: Mask array (1=valid, 0=missing).
         fixed_length: Target character length.
-    
+
     Returns:
         Array with strings padded/truncated to fixed_length.
     """
@@ -102,10 +104,10 @@ def _apply_fixed_length_to_strings(str_array: np.ndarray, mask: np.ndarray, fixe
 
 def _trim_trailing_whitespace(s: str) -> str:
     """Trim trailing whitespace from a string.
-    
+
     Args:
         s: Input string.
-    
+
     Returns:
         String with trailing whitespace removed.
     """
@@ -114,27 +116,27 @@ def _trim_trailing_whitespace(s: str) -> str:
 
 def _decode_fixed_length_strings(str_array: np.ndarray, mask: np.ndarray) -> np.ndarray:
     """Decode fixed-length strings and trim trailing whitespace from valid entries.
-    
+
     Args:
         str_array: Array of fixed-length strings.
         mask: Mask array (1=valid, 0=missing).
-    
+
     Returns:
         Object array with trimmed strings and None for missing values.
     """
     result = np.empty(len(str_array), dtype=object)
     valid_indices = mask == 1
-    
+
     # Set valid entries with trimmed strings
     for i in np.where(valid_indices)[0]:
         raw_str = str_array[i]
         if isinstance(raw_str, bytes):
             raw_str = raw_str.decode("utf-8")
         result[i] = _trim_trailing_whitespace(str(raw_str))
-    
+
     # Set missing entries to None
     result[mask == 0] = None
-    
+
     return result
 
 
@@ -171,7 +173,7 @@ def _encode_values_for_hdf5(
         # Check if object dtype contains boolean-like values
         non_null_values = values.dropna()
         if len(non_null_values) > 0 and all(
-            isinstance(v, (bool, np.bool_)) or v in (True, False)
+            isinstance(v, bool | np.bool_) or v in (True, False)
             for v in non_null_values
         ):
             # Treat as boolean/numeric data
@@ -185,10 +187,12 @@ def _encode_values_for_hdf5(
             # Replace NaN string representations with empty strings
             str_array = str_values.values
             str_array[np.asarray(values.isna())] = ""
-            
+
             if string_fixed_length is not None:
                 # Apply fixed-length padding/truncation
-                str_array = _apply_fixed_length_to_strings(str_array, mask, string_fixed_length)
+                str_array = _apply_fixed_length_to_strings(
+                    str_array, mask, string_fixed_length
+                )
                 # Create array with explicit UTF-8 encoding for fixed-length
                 try:
                     encoded = str_array.astype(_get_string_dtype(string_fixed_length))
@@ -198,8 +202,12 @@ def _encode_values_for_hdf5(
                     for i, s in enumerate(str_array):
                         if mask[i] == 1:
                             # Keep only ASCII characters for problematic Unicode
-                            ascii_safe_array[i] = s.encode('ascii', 'ignore').decode('ascii')[:string_fixed_length]
-                    encoded = ascii_safe_array.astype(_get_string_dtype(string_fixed_length))
+                            ascii_safe_array[i] = s.encode("ascii", "ignore").decode(
+                                "ascii"
+                            )[:string_fixed_length]
+                    encoded = ascii_safe_array.astype(
+                        _get_string_dtype(string_fixed_length)
+                    )
                 values_kind = "string_utf8_fixed"
             else:
                 encoded = str_array.astype(_get_string_dtype())
@@ -211,10 +219,12 @@ def _encode_values_for_hdf5(
         # Replace NaN string representations with empty strings
         str_array = str_values.values
         str_array[np.asarray(values.isna())] = ""
-        
+
         if string_fixed_length is not None:
             # Apply fixed-length padding/truncation
-            str_array = _apply_fixed_length_to_strings(str_array, mask, string_fixed_length)
+            str_array = _apply_fixed_length_to_strings(
+                str_array, mask, string_fixed_length
+            )
             # Create array with explicit UTF-8 encoding for fixed-length
             try:
                 encoded = str_array.astype(_get_string_dtype(string_fixed_length))
@@ -224,8 +234,12 @@ def _encode_values_for_hdf5(
                 for i, s in enumerate(str_array):
                     if mask[i] == 1:
                         # Keep only ASCII characters for problematic Unicode
-                        ascii_safe_array[i] = s.encode('ascii', 'ignore').decode('ascii')[:string_fixed_length]
-                encoded = ascii_safe_array.astype(_get_string_dtype(string_fixed_length))
+                        ascii_safe_array[i] = s.encode("ascii", "ignore").decode(
+                            "ascii"
+                        )[:string_fixed_length]
+                encoded = ascii_safe_array.astype(
+                    _get_string_dtype(string_fixed_length)
+                )
             values_kind = "string_utf8_fixed"
         else:
             encoded = str_array.astype(_get_string_dtype())
@@ -280,11 +294,15 @@ def _encode_index_for_hdf5(
             # Replace NaN representations
             str_array = str_values.values
             str_array[np.asarray(level_series.isna())] = ""
-            
+
             if string_fixed_length is not None:
                 # Apply fixed-length padding/truncation
-                str_array = _apply_fixed_length_to_strings(str_array, mask, string_fixed_length)
-                encoded_arrays.append(str_array.astype(_get_string_dtype(string_fixed_length)))
+                str_array = _apply_fixed_length_to_strings(
+                    str_array, mask, string_fixed_length
+                )
+                encoded_arrays.append(
+                    str_array.astype(_get_string_dtype(string_fixed_length))
+                )
             else:
                 encoded_arrays.append(str_array.astype(_get_string_dtype()))
             mask_arrays.append(np.asarray(mask))
@@ -308,10 +326,12 @@ def _encode_index_for_hdf5(
         # Replace NaN representations
         str_array = str_values.values
         str_array[np.asarray(index_series.isna())] = ""
-        
+
         if string_fixed_length is not None:
             # Apply fixed-length padding/truncation
-            str_array = _apply_fixed_length_to_strings(str_array, mask, string_fixed_length)
+            str_array = _apply_fixed_length_to_strings(
+                str_array, mask, string_fixed_length
+            )
             encoded_arrays = str_array.astype(_get_string_dtype(string_fixed_length))  # type: ignore[assignment]
         else:
             encoded_arrays = str_array.astype(_get_string_dtype())  # type: ignore[assignment]
@@ -397,7 +417,7 @@ def _decode_index_from_hdf5(
     if isinstance(index_names_attr, bytes):
         index_names_attr = index_names_attr.decode("utf-8")
     index_names = json.loads(index_names_attr)
-    
+
     # Check if index uses fixed-length strings
     index_kind = group.attrs.get("index_kind", "string_utf8_vlen")
     if isinstance(index_kind, bytes):
@@ -499,7 +519,7 @@ def preallocate_series_layout(
     """
     if require_swmr:
         assert_swmr_on(group)
-    
+
     # Prevent object creation under SWMR (SWMR programming model compliance)
     if group.file.swmr_mode and dataset not in group:
         raise SWMRModeError(
@@ -525,7 +545,7 @@ def preallocate_series_layout(
             dtype = _get_string_dtype(string_fixed_length)
         else:
             dtype = _get_string_dtype()
-        
+
         _create_resizable_dataset(
             group,
             dataset,
@@ -553,7 +573,7 @@ def preallocate_series_layout(
         index_dtype = _get_string_dtype(string_fixed_length)
     else:
         index_dtype = _get_string_dtype()
-    
+
     if index_metadata["index_is_multiindex"]:
         # Create index group and level datasets
         index_group = group.create_group(index_dataset)
@@ -610,7 +630,7 @@ def preallocate_series_layout(
     group.attrs["orig_index_dtype"] = orig_index_dtype
     group.attrs["created_at_iso"] = datetime.now().isoformat()
     group.attrs["version"] = "1.0"
-    
+
     # Set string fixed length attributes when applicable
     if values_kind == "string_utf8_fixed":
         group.attrs["string_fixed_length"] = string_fixed_length
@@ -765,7 +785,7 @@ def save_series_update(
     stored_values_kind = group.attrs["values_kind"]
     if isinstance(stored_values_kind, bytes):
         stored_values_kind = stored_values_kind.decode("utf-8")
-    
+
     stored_index_kind = group.attrs.get("index_kind", "string_utf8_vlen")
     if isinstance(stored_index_kind, bytes):
         stored_index_kind = stored_index_kind.decode("utf-8")
@@ -787,7 +807,7 @@ def save_series_update(
     string_fixed_length = None
     if stored_values_kind == "string_utf8_fixed":
         string_fixed_length = group.attrs["string_fixed_length"]
-    
+
     index_string_fixed_length = None
     if stored_index_kind == "string_utf8_fixed":
         index_string_fixed_length = group.attrs["index_string_fixed_length"]
@@ -974,7 +994,7 @@ def preallocate_frame_layout(
     """
     if require_swmr:
         assert_swmr_on(group)
-    
+
     # Prevent object creation under SWMR (SWMR programming model compliance)
     if group.file.swmr_mode and "index" not in group:
         raise SWMRModeError(
