@@ -79,8 +79,10 @@ def _pad_or_truncate_string(s: str, fixed_length: int) -> str:
 
 
 def _apply_fixed_length_to_strings(
-    str_array: np.ndarray, mask: np.ndarray, fixed_length: int
-) -> np.ndarray:
+    str_array: np.ndarray[Any, np.dtype[Any]],
+    mask: np.ndarray[Any, np.dtype[Any]],
+    fixed_length: int,
+) -> np.ndarray[Any, np.dtype[Any]]:
     """Apply fixed-length padding/truncation to string array.
 
     Args:
@@ -114,7 +116,9 @@ def _trim_trailing_whitespace(s: str) -> str:
     return s.rstrip()
 
 
-def _decode_fixed_length_strings(str_array: np.ndarray, mask: np.ndarray) -> np.ndarray:
+def _decode_fixed_length_strings(
+    str_array: np.ndarray[Any, np.dtype[Any]], mask: np.ndarray[Any, np.dtype[Any]]
+) -> np.ndarray[Any, np.dtype[Any]]:
     """Decode fixed-length strings and trim trailing whitespace from valid entries.
 
     Args:
@@ -191,7 +195,7 @@ def _encode_values_for_hdf5(
             if string_fixed_length is not None:
                 # Apply fixed-length padding/truncation
                 str_array = _apply_fixed_length_to_strings(
-                    str_array, mask, string_fixed_length
+                    np.asarray(str_array), np.asarray(mask), string_fixed_length
                 )
                 # Create array with explicit UTF-8 encoding for fixed-length
                 try:
@@ -223,7 +227,7 @@ def _encode_values_for_hdf5(
         if string_fixed_length is not None:
             # Apply fixed-length padding/truncation
             str_array = _apply_fixed_length_to_strings(
-                str_array, mask, string_fixed_length
+                np.asarray(str_array), np.asarray(mask), string_fixed_length
             )
             # Create array with explicit UTF-8 encoding for fixed-length
             try:
@@ -298,7 +302,7 @@ def _encode_index_for_hdf5(
             if string_fixed_length is not None:
                 # Apply fixed-length padding/truncation
                 str_array = _apply_fixed_length_to_strings(
-                    str_array, mask, string_fixed_length
+                    np.asarray(str_array), np.asarray(mask), string_fixed_length
                 )
                 encoded_arrays.append(
                     str_array.astype(_get_string_dtype(string_fixed_length))
@@ -330,7 +334,7 @@ def _encode_index_for_hdf5(
         if string_fixed_length is not None:
             # Apply fixed-length padding/truncation
             str_array = _apply_fixed_length_to_strings(
-                str_array, mask, string_fixed_length
+                np.asarray(str_array), np.asarray(mask), string_fixed_length
             )
             encoded_arrays = str_array.astype(_get_string_dtype(string_fixed_length))  # type: ignore[assignment]
         else:
