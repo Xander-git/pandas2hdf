@@ -1,0 +1,8 @@
+---
+description:
+globs:
+alwaysApply: true
+---
+- use uv package manager
+- activate venv with ```source .venv/bin/activate```
+- test with pytest, ruff, mypy, and black

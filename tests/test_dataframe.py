@@ -47,10 +47,15 @@ class TestDataFrameIO:
         )
 
         with h5py.File(temp_hdf5_file, "w", libver="latest") as f:
-            f.swmr_mode = True
             group = f.create_group("frame")
 
-            save_frame_new(group, df, require_swmr=True)
+            # Step 1: Create all objects BEFORE enabling SWMR
+            save_frame_new(group, df, require_swmr=False)
+
+            # Step 2: Start SWMR mode
+            f.swmr_mode = True
+
+            # Step 3: Load under SWMR
             loaded = load_frame(group, require_swmr=True)
 
             # Check column order preserved
@@ -97,10 +102,15 @@ class TestDataFrameIO:
         )
 
         with h5py.File(temp_hdf5_file, "w", libver="latest") as f:
-            f.swmr_mode = True
             group = f.create_group("frame")
 
-            save_frame_new(group, df, require_swmr=True)
+            # Step 1: Create all objects BEFORE enabling SWMR
+            save_frame_new(group, df, require_swmr=False)
+
+            # Step 2: Start SWMR mode
+            f.swmr_mode = True
+
+            # Step 3: Load under SWMR
             loaded = load_frame(group, require_swmr=True)
 
             # Check MultiIndex preserved
@@ -121,21 +131,25 @@ class TestDataFrameIO:
         empty_df = pd.DataFrame()
 
         with h5py.File(temp_hdf5_file, "w", libver="latest") as f:
-            f.swmr_mode = True
             group = f.create_group("frame")
 
             with pytest.raises(ValidationError, match="Cannot save empty DataFrame"):
-                save_frame_new(group, empty_df, require_swmr=True)
+                save_frame_new(group, empty_df, require_swmr=False)
 
     def test_frame_single_column(self, temp_hdf5_file):
         """Test DataFrame with single column."""
         df = pd.DataFrame({"single_col": [1, 2, 3, 4, 5]})
 
         with h5py.File(temp_hdf5_file, "w", libver="latest") as f:
-            f.swmr_mode = True
             group = f.create_group("frame")
 
-            save_frame_new(group, df, require_swmr=True)
+            # Step 1: Create all objects BEFORE enabling SWMR
+            save_frame_new(group, df, require_swmr=False)
+
+            # Step 2: Start SWMR mode
+            f.swmr_mode = True
+
+            # Step 3: Load under SWMR
             loaded = load_frame(group, require_swmr=True)
 
             expected = df.astype(np.float64)
@@ -155,10 +169,15 @@ class TestDataFrameIO:
         )
 
         with h5py.File(temp_hdf5_file, "w", libver="latest") as f:
-            f.swmr_mode = True
             group = f.create_group("frame")
 
-            save_frame_new(group, df, require_swmr=True)
+            # Step 1: Create all objects BEFORE enabling SWMR
+            save_frame_new(group, df, require_swmr=False)
+
+            # Step 2: Start SWMR mode
+            f.swmr_mode = True
+
+            # Step 3: Load under SWMR
             loaded = load_frame(group, require_swmr=True)
 
             # Numeric columns become float64
@@ -185,10 +204,13 @@ class TestDataFrameWriteModes:
         )
 
         with h5py.File(temp_hdf5_file, "w", libver="latest") as f:
-            f.swmr_mode = True
             group = f.create_group("frame")
 
-            preallocate_frame_layout(group, df, preallocate=100, require_swmr=True)
+            # Step 1: Create all objects BEFORE enabling SWMR
+            preallocate_frame_layout(group, df, preallocate=100, require_swmr=False)
+
+            # Step 2: Start SWMR mode
+            f.swmr_mode = True
 
             # Check structure
             assert group.attrs["len"] == 0
@@ -221,10 +243,15 @@ class TestDataFrameWriteModes:
         )
 
         with h5py.File(temp_hdf5_file, "w", libver="latest") as f:
-            f.swmr_mode = True
             group = f.create_group("frame")
 
-            save_frame_new(group, initial_df, require_swmr=True)
+            # Step 1: Create all objects BEFORE enabling SWMR
+            save_frame_new(group, initial_df, require_swmr=False)
+
+            # Step 2: Start SWMR mode
+            f.swmr_mode = True
+
+            # Step 3: Write more data under SWMR
             save_frame_append(group, append_df, require_swmr=True)
 
             loaded = load_frame(group, require_swmr=True)
@@ -254,10 +281,15 @@ class TestDataFrameWriteModes:
         )
 
         with h5py.File(temp_hdf5_file, "w", libver="latest") as f:
-            f.swmr_mode = True
             group = f.create_group("frame")
 
-            save_frame_new(group, initial_df, require_swmr=True)
+            # Step 1: Create all objects BEFORE enabling SWMR
+            save_frame_new(group, initial_df, require_swmr=False)
+
+            # Step 2: Start SWMR mode
+            f.swmr_mode = True
+
+            # Step 3: Update data under SWMR
             save_frame_update(group, update_df, start=1, require_swmr=True)
 
             loaded = load_frame(group, require_swmr=True)
@@ -280,10 +312,13 @@ class TestDataFrameWriteModes:
         wrong_order_df = pd.DataFrame({"col2": [3], "col1": [4]})
 
         with h5py.File(temp_hdf5_file, "w", libver="latest") as f:
-            f.swmr_mode = True
             group = f.create_group("frame")
 
-            save_frame_new(group, initial_df, require_swmr=True)
+            # Step 1: Create all objects BEFORE enabling SWMR
+            save_frame_new(group, initial_df, require_swmr=False)
+
+            # Step 2: Start SWMR mode
+            f.swmr_mode = True
 
             with pytest.raises(SchemaMismatchError, match="Column order mismatch"):
                 save_frame_update(group, wrong_order_df, start=0, require_swmr=True)
@@ -298,14 +333,17 @@ class TestDataFrameWriteModes:
         )
 
         with h5py.File(temp_hdf5_file, "w", libver="latest") as f:
-            f.swmr_mode = True
             group = f.create_group("frame")
 
+            # Step 1: Create all objects BEFORE enabling SWMR
             # Preallocate first
-            preallocate_frame_layout(group, df, preallocate=100, require_swmr=True)
+            preallocate_frame_layout(group, df, preallocate=100, require_swmr=False)
 
             # Then save (should reuse layout)
-            save_frame_new(group, df, require_swmr=True)
+            save_frame_new(group, df, require_swmr=False)
+
+            # Step 2: Start SWMR mode
+            f.swmr_mode = True
 
             loaded = load_frame(group, require_swmr=True)
 

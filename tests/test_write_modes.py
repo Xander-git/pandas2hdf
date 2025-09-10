@@ -39,10 +39,15 @@ class TestSeriesWriteModes:
         series = pd.Series([1, 2, 3], index=["a", "b", "c"], name="test")
 
         with h5py.File(temp_hdf5_file, "w", libver="latest") as f:
-            f.swmr_mode = True
             group = f.create_group("series")
 
-            preallocate_series_layout(group, series, preallocate=100, require_swmr=True)
+            # Step 1: Create all objects BEFORE enabling SWMR
+            preallocate_series_layout(
+                group, series, preallocate=100, require_swmr=False
+            )
+
+            # Step 2: Start SWMR mode
+            f.swmr_mode = True
 
             # Check preallocated structure
             assert group.attrs["len"] == 0
@@ -60,14 +65,19 @@ class TestSeriesWriteModes:
         series = pd.Series([1, 2, 3], index=["a", "b", "c"], name="test")
 
         with h5py.File(temp_hdf5_file, "w", libver="latest") as f:
-            f.swmr_mode = True
             group = f.create_group("series")
 
+            # Step 1: Create all objects BEFORE enabling SWMR
             # Preallocate first
-            preallocate_series_layout(group, series, preallocate=100, require_swmr=True)
+            preallocate_series_layout(
+                group, series, preallocate=100, require_swmr=False
+            )
 
             # Then save data (should reuse layout)
-            save_series_new(group, series, require_swmr=True)
+            save_series_new(group, series, require_swmr=False)
+
+            # Step 2: Start SWMR mode
+            f.swmr_mode = True
 
             # Check data was written
             assert group.attrs["len"] == 3
@@ -80,11 +90,13 @@ class TestSeriesWriteModes:
         update = pd.Series([10, 20], index=["x", "y"], name="test")
 
         with h5py.File(temp_hdf5_file, "w", libver="latest") as f:
-            f.swmr_mode = True
             group = f.create_group("series")
 
-            # Save initial data
-            save_series_new(group, initial, require_swmr=True)
+            # Step 1: Create all objects BEFORE enabling SWMR
+            save_series_new(group, initial, require_swmr=False)
+
+            # Step 2: Start SWMR mode
+            f.swmr_mode = True
 
             # Update at position 1
             save_series_update(group, update, start=1, require_swmr=True)
@@ -101,11 +113,13 @@ class TestSeriesWriteModes:
         append_data = pd.Series([3, 4], index=["c", "d"], name="test")
 
         with h5py.File(temp_hdf5_file, "w", libver="latest") as f:
-            f.swmr_mode = True
             group = f.create_group("series")
 
-            # Save initial data
-            save_series_new(group, initial, require_swmr=True)
+            # Step 1: Create all objects BEFORE enabling SWMR
+            save_series_new(group, initial, require_swmr=False)
+
+            # Step 2: Start SWMR mode
+            f.swmr_mode = True
 
             # Append more data
             save_series_append(group, append_data, require_swmr=True)
@@ -124,10 +138,13 @@ class TestSeriesWriteModes:
         update = pd.Series([10], index=["x"], name="test")
 
         with h5py.File(temp_hdf5_file, "w", libver="latest") as f:
-            f.swmr_mode = True
             group = f.create_group("series")
 
-            save_series_new(group, initial, require_swmr=True)
+            # Step 1: Create all objects BEFORE enabling SWMR
+            save_series_new(group, initial, require_swmr=False)
+
+            # Step 2: Start SWMR mode
+            f.swmr_mode = True
 
             # Try to update at position 5 (non-contiguous)
             with pytest.raises(ValidationError, match="Non-contiguous update"):
@@ -139,11 +156,13 @@ class TestSeriesWriteModes:
         string_series = pd.Series(["a", "b"], name="test")
 
         with h5py.File(temp_hdf5_file, "w", libver="latest") as f:
-            f.swmr_mode = True
             group = f.create_group("series")
 
-            # Save numeric series first
-            save_series_new(group, numeric_series, require_swmr=True)
+            # Step 1: Create all objects BEFORE enabling SWMR
+            save_series_new(group, numeric_series, require_swmr=False)
+
+            # Step 2: Start SWMR mode
+            f.swmr_mode = True
 
             # Try to update with string data
             with pytest.raises(SchemaMismatchError, match="Values kind mismatch"):
@@ -156,12 +175,14 @@ class TestSeriesWriteModes:
         series3 = pd.Series([4, 5], index=["d", "e"], name="test")
 
         with h5py.File(temp_hdf5_file, "w", libver="latest") as f:
-            f.swmr_mode = True
             group = f.create_group("series")
 
-            # Initial data
-            save_series_new(group, series1, require_swmr=True)
+            # Step 1: Create all objects BEFORE enabling SWMR
+            save_series_new(group, series1, require_swmr=False)
             assert group.attrs["len"] == 2
+
+            # Step 2: Start SWMR mode
+            f.swmr_mode = True
 
             # First append
             save_series_append(group, series2, require_swmr=True)
@@ -184,10 +205,14 @@ class TestSeriesWriteModes:
         update = pd.Series([3, 4], index=["c", "d"], name="test")
 
         with h5py.File(temp_hdf5_file, "w", libver="latest") as f:
-            f.swmr_mode = True
             group = f.create_group("series")
 
-            save_series_new(group, initial, require_swmr=True)
+            # Step 1: Create all objects BEFORE enabling SWMR
+            save_series_new(group, initial, require_swmr=False)
+
+            # Step 2: Start SWMR mode
+            f.swmr_mode = True
+
             save_series_update(group, update, start=2, require_swmr=True)
 
             loaded = load_series(group, require_swmr=True)

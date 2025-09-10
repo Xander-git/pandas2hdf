@@ -81,8 +81,8 @@ class TestSeriesIO:
             (np.float32, "numeric_float64"),
             (np.float64, "numeric_float64"),
             (bool, "numeric_float64"),
-            (str, "string_utf8_vlen"),
-            (object, "string_utf8_vlen"),
+            (str, "string_utf8_fixed"),
+            (object, "string_utf8_fixed"),
         ],
     )
     def test_series_round_trip_dtypes(self, temp_hdf5_file, dtype, expected_kind):
@@ -110,11 +110,21 @@ class TestSeriesIO:
         series = pd.Series(data, dtype=dtype, name="test_series")
 
         with h5py.File(temp_hdf5_file, "w", libver="latest") as f:
-            f.swmr_mode = True
             group = f.create_group("series")
 
-            # Save and load
-            save_series_new(group, series, require_swmr=True)
+            # Step 1: Create all objects BEFORE enabling SWMR
+            # Use fixed-length strings for string data
+            if dtype in [str, object]:
+                save_series_new(
+                    group, series, string_fixed_length=10, require_swmr=False
+                )
+            else:
+                save_series_new(group, series, require_swmr=False)
+
+            # Step 2: Start SWMR mode
+            f.swmr_mode = True
+
+            # Step 3: Load under SWMR
             loaded = load_series(group, require_swmr=True)
 
             # Check values kind attribute
@@ -140,10 +150,15 @@ class TestSeriesIO:
         series = pd.Series([1, 2, 3, 4], index=["a", "b", "c", "d"], name="indexed")
 
         with h5py.File(temp_hdf5_file, "w", libver="latest") as f:
-            f.swmr_mode = True
             group = f.create_group("series")
 
-            save_series_new(group, series, require_swmr=True)
+            # Step 1: Create all objects BEFORE enabling SWMR
+            save_series_new(group, series, require_swmr=False)
+
+            # Step 2: Start SWMR mode
+            f.swmr_mode = True
+
+            # Step 3: Load under SWMR
             loaded = load_series(group, require_swmr=True)
 
             pd.testing.assert_series_equal(loaded, series.astype(np.float64))
@@ -158,10 +173,15 @@ class TestSeriesIO:
         series = pd.Series([10, 20, 30, 40, 50], index=index, name="multi_series")
 
         with h5py.File(temp_hdf5_file, "w", libver="latest") as f:
-            f.swmr_mode = True
             group = f.create_group("series")
 
-            save_series_new(group, series, require_swmr=True)
+            # Step 1: Create all objects BEFORE enabling SWMR
+            save_series_new(group, series, require_swmr=False)
+
+            # Step 2: Start SWMR mode
+            f.swmr_mode = True
+
+            # Step 3: Load under SWMR
             loaded = load_series(group, require_swmr=True)
 
             # Check attributes
