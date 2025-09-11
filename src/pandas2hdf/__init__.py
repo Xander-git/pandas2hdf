@@ -14,7 +14,7 @@ from .core import (
     save_series_update,
 )
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 __all__ = [
     "assert_swmr_on",
